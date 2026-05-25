@@ -4,7 +4,7 @@ target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
-
+financial-docs
 ### STS ###
 .apt_generated
 .classpath
@@ -14,6 +14,7 @@ target/
 .springBeans
 .sts4-cache
 .resources/financial-docs
+src/main/resources/financial-docs
 ### IntelliJ IDEA ###
 .idea
 *.iws
