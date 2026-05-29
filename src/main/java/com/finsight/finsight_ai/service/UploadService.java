@@ -1,5 +1,7 @@
 package com.finsight.finsight_ai.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.sourceforge.tess4j.Tesseract;
@@ -16,6 +18,8 @@ import org.springframework.web.multipart.MultipartFile;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.InputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
@@ -25,10 +29,24 @@ import java.util.*;
 public class UploadService {
 
     private final VectorStore vectorStore;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    // Supported image formats
+    private static final Set<String> SUPPORTED_IMAGE_FORMATS = Set.of(
+            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"
+    );
 
     // Initialize Tesseract OCR
+    // Initialize Tesseract OCR
     private Tesseract getTesseractInstance() {
+        // 1. Force JNA to look in the Homebrew directory for the native library
+        System.setProperty("jna.library.path", "/opt/homebrew/lib");
+
         Tesseract tesseract = new Tesseract();
+
+        // 2. Point Tesseract to the language data files, otherwise it will crash next!
+        tesseract.setDatapath("/opt/homebrew/share/tessdata");
+
         tesseract.setLanguage("eng");
         tesseract.setOcrEngineMode(3);
         tesseract.setPageSegMode(1);
@@ -39,19 +57,21 @@ public class UploadService {
         try {
             String fileName = file.getOriginalFilename();
             String contentType = file.getContentType();
+            String fileExtension = getFileExtension(fileName);
 
-            log.info("Processing file: {}, type: {}, size: {} bytes",
-                    fileName, contentType, file.getSize());
+            log.info("Processing file: {}, type: {}, size: {} bytes, extension: {}",
+                    fileName, contentType, file.getSize(), fileExtension);
 
             String extractedText;
             Map<String, Object> metadata = new HashMap<>();
 
             metadata.put("fileName", fileName);
             metadata.put("fileType", contentType);
+            metadata.put("fileExtension", fileExtension);
             metadata.put("fileSize", file.getSize());
             metadata.put("uploadTimestamp", System.currentTimeMillis());
 
-            // Process based on file type
+            // Process based on file extension and content type
             if (contentType != null && contentType.startsWith("image/")) {
                 extractedText = extractTextFromImage(file);
                 metadata.put("documentType", "image");
@@ -63,6 +83,18 @@ public class UploadService {
                 metadata.put("documentType", "pdf");
                 log.info("Extracted {} characters from PDF", extractedText.length());
 
+            } else if (fileExtension.equalsIgnoreCase("csv")) {
+                extractedText = extractTextFromCsv(file);
+                metadata.put("documentType", "csv");
+                int rowCount = extractedText.split("\n").length;
+                metadata.put("rowCount", rowCount);
+                log.info("Extracted {} rows from CSV", rowCount);
+
+            } else if (fileExtension.equalsIgnoreCase("json")) {
+                extractedText = extractTextFromJson(file);
+                metadata.put("documentType", "json");
+                log.info("Extracted {} characters from JSON", extractedText.length());
+
             } else if (contentType != null &&
                     (contentType.equals("text/plain") ||
                             contentType.equals("text/csv") ||
@@ -71,12 +103,23 @@ public class UploadService {
                 metadata.put("documentType", "text");
                 log.info("Extracted {} characters from text file", extractedText.length());
 
-            } else if (contentType != null &&
-                    (contentType.equals("application/msword") ||
-                            contentType.equals("application/vnd.openxmlformats-officedocument.wordprocessingml.document"))) {
+            } else if (fileExtension.equalsIgnoreCase("docx") ||
+                    fileExtension.equalsIgnoreCase("doc")) {
                 extractedText = extractTextFromWord(file);
                 metadata.put("documentType", "word");
                 log.info("Extracted {} characters from Word document", extractedText.length());
+
+            } else if (fileExtension.equalsIgnoreCase("xlsx") ||
+                    fileExtension.equalsIgnoreCase("xls")) {
+                extractedText = extractTextFromExcel(file);
+                metadata.put("documentType", "excel");
+                log.info("Extracted {} characters from Excel", extractedText.length());
+
+            } else if (fileExtension.equalsIgnoreCase("html") ||
+                    fileExtension.equalsIgnoreCase("htm")) {
+                extractedText = extractTextFromHtml(file);
+                metadata.put("documentType", "html");
+                log.info("Extracted {} characters from HTML", extractedText.length());
 
             } else {
                 extractedText = new String(file.getBytes(), StandardCharsets.UTF_8);
@@ -84,7 +127,7 @@ public class UploadService {
                 log.warn("Unknown file type: {}, treated as text", contentType);
             }
 
-            if (extractedText.trim().isEmpty()) {
+            if (extractedText == null || extractedText.trim().isEmpty()) {
                 log.warn("No text extracted from file: {}", fileName);
                 metadata.put("extractionStatus", "failed");
                 Document emptyDoc = new Document("No text could be extracted from this file.", metadata);
@@ -105,8 +148,8 @@ public class UploadService {
             List<Document> splitDocs = splitter.apply(List.of(document));
             vectorStore.add(splitDocs);
 
-            log.info("✅ File processed successfully: {} -> {} chunks",
-                    fileName, splitDocs.size());
+            log.info("✅ File processed successfully: {} -> {} chunks, {} characters",
+                    fileName, splitDocs.size(), extractedText.length());
 
         } catch (Exception e) {
             log.error("Error processing file: {}", file.getOriginalFilename(), e);
@@ -114,17 +157,41 @@ public class UploadService {
         }
     }
 
+    /**
+     * Extract text from image with WebP support
+     */
     private String extractTextFromImage(MultipartFile file) {
         try (InputStream inputStream = file.getInputStream()) {
-            BufferedImage image = ImageIO.read(inputStream);
+            BufferedImage image = null;
+            String fileName = file.getOriginalFilename();
+            String fileExtension = getFileExtension(fileName);
+
+            // Try to read the image with standard ImageIO first
+            image = ImageIO.read(inputStream);
+
+            // If standard reading fails and it's a WebP, try alternative approach
+            if (image == null && "webp".equalsIgnoreCase(fileExtension)) {
+                log.info("WebP image detected, trying alternative decoding...");
+                image = decodeWebPImage(file.getBytes());
+            }
+
+            // If still null, try to read from bytes again
+            if (image == null) {
+                image = ImageIO.read(new ByteArrayInputStream(file.getBytes()));
+            }
 
             if (image == null) {
-                log.warn("Could not read image file: {}", file.getOriginalFilename());
+                log.warn("Could not read image file: {}. Unsupported format or corrupted file.", fileName);
                 return "";
             }
 
+            // Pre-process image for better OCR
+            image = preprocessImageForOCR(image);
+
             Tesseract tesseract = getTesseractInstance();
             String extractedText = tesseract.doOCR(image);
+
+            log.info("OCR extracted {} characters from image: {}", extractedText.length(), fileName);
             return cleanExtractedText(extractedText);
 
         } catch (TesseractException e) {
@@ -137,76 +204,200 @@ public class UploadService {
     }
 
     /**
-     * ✅ FIXED: Extract text from PDF using PDFBox 3.x
+     * Decode WebP image using alternative method
+     * Note: This is a simple fallback. For production, use webp-imageio dependency
+     */
+    private BufferedImage decodeWebPImage(byte[] imageBytes) {
+        try {
+            // Try to read using standard ImageIO with webp-imageio plugin
+            // If plugin is not available, this will return null
+            return ImageIO.read(new ByteArrayInputStream(imageBytes));
+        } catch (Exception e) {
+            log.warn("WebP decoding failed: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Pre-process image for better OCR accuracy
+     */
+    private BufferedImage preprocessImageForOCR(BufferedImage original) {
+        if (original == null) return null;
+
+        try {
+            // Convert to grayscale for better OCR
+            BufferedImage grayscale = new BufferedImage(
+                    original.getWidth(),
+                    original.getHeight(),
+                    BufferedImage.TYPE_BYTE_GRAY
+            );
+
+            java.awt.Graphics2D g2d = grayscale.createGraphics();
+            g2d.drawImage(original, 0, 0, null);
+            g2d.dispose();
+
+            return grayscale;
+
+        } catch (Exception e) {
+            log.warn("Image preprocessing failed, using original: {}", e.getMessage());
+            return original;
+        }
+    }
+
+    /**
+     * Extract text from PDF using PDFBox 3.x
      */
     private String extractTextFromPdf(MultipartFile file) {
         try (InputStream inputStream = file.getInputStream()) {
-            // ✅ Fixed: Use Loader.loadPDF() instead of PDDocument.load()
             PDDocument document = Loader.loadPDF(inputStream.readAllBytes());
-
             PDFTextStripper stripper = new PDFTextStripper();
             String extractedText = stripper.getText(document);
             document.close();
-
             return cleanExtractedText(extractedText);
-
         } catch (Exception e) {
             log.error("Error extracting text from PDF: {}", file.getOriginalFilename(), e);
             return "";
         }
     }
 
-    private String extractTextFromWord(MultipartFile file) {
+    /**
+     * Extract text from Excel files
+     */
+    private String extractTextFromExcel(MultipartFile file) {
         try {
-            String filename = file.getOriginalFilename();
-            if (filename != null && filename.endsWith(".docx")) {
-                return "Word document processing requires additional configuration. Please convert to PDF or text format.";
-            } else {
-                return "Legacy Word documents (.doc) are not fully supported. Please convert to PDF or .docx format.";
-            }
+            // For full Excel support, add Apache POI dependency
+            return "Excel file detected: " + file.getOriginalFilename() + "\n" +
+                    "Size: " + file.getSize() + " bytes\n" +
+                    "Please ensure Apache POI is configured for full text extraction.";
         } catch (Exception e) {
-            log.error("Error processing Word document: {}", file.getOriginalFilename(), e);
+            log.error("Error processing Excel: {}", file.getOriginalFilename(), e);
             return "";
         }
     }
 
+    /**
+     * Extract text from CSV
+     */
+    private String extractTextFromCsv(MultipartFile file) {
+        try (InputStream inputStream = file.getInputStream();
+             java.io.BufferedReader reader = new java.io.BufferedReader(
+                     new java.io.InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+
+            StringBuilder content = new StringBuilder();
+            String line;
+            int rowNum = 0;
+
+            content.append("CSV Data File: ").append(file.getOriginalFilename()).append("\n\n");
+
+            while ((line = reader.readLine()) != null) {
+                rowNum++;
+                String[] columns = line.split(",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)");
+
+                if (rowNum == 1) {
+                    content.append("Headers: ").append(String.join(" | ", columns)).append("\n\n");
+                } else {
+                    content.append("Row ").append(rowNum - 1).append(":\n");
+                    for (int i = 0; i < columns.length; i++) {
+                        content.append("  • ").append(columns[i]).append("\n");
+                    }
+                    content.append("\n");
+                }
+            }
+
+            return content.toString();
+
+        } catch (Exception e) {
+            log.error("Error processing CSV: {}", file.getOriginalFilename(), e);
+            return "";
+        }
+    }
+
+    /**
+     * Extract text from JSON
+     */
+    private String extractTextFromJson(MultipartFile file) {
+        try {
+            String jsonString = new String(file.getBytes(), StandardCharsets.UTF_8);
+            JsonNode jsonNode = objectMapper.readTree(jsonString);
+
+            StringBuilder content = new StringBuilder();
+            content.append("JSON Data File: ").append(file.getOriginalFilename()).append("\n\n");
+            formatJsonNode(jsonNode, "", content);
+
+            return content.toString();
+
+        } catch (Exception e) {
+            log.error("Error processing JSON: {}", file.getOriginalFilename(), e);
+            return "";
+        }
+    }
+
+    /**
+     * Recursively format JSON as readable text
+     */
+    private void formatJsonNode(JsonNode node, String prefix, StringBuilder content) {
+        if (node.isObject()) {
+            node.fields().forEachRemaining(entry -> {
+                content.append(prefix).append(entry.getKey()).append(": ");
+                formatJsonNode(entry.getValue(), prefix + "  ", content);
+            });
+        } else if (node.isArray()) {
+            int index = 0;
+            for (JsonNode item : node) {
+                content.append(prefix).append("Item ").append(index++).append(": ");
+                formatJsonNode(item, prefix + "  ", content);
+            }
+        } else {
+            content.append(node.asText()).append("\n");
+        }
+    }
+
+    /**
+     * Extract text from HTML
+     */
+    private String extractTextFromHtml(MultipartFile file) {
+        try {
+            String html = new String(file.getBytes(), StandardCharsets.UTF_8);
+            String text = html.replaceAll("<script[^>]*>.*?</script>", " ")
+                    .replaceAll("<style[^>]*>.*?</style>", " ")
+                    .replaceAll("<[^>]*>", " ")
+                    .replaceAll("\\s+", " ")
+                    .trim();
+            return text;
+        } catch (Exception e) {
+            log.error("Error processing HTML: {}", file.getOriginalFilename(), e);
+            return "";
+        }
+    }
+
+    /**
+     * Extract text from Word document
+     */
+    private String extractTextFromWord(MultipartFile file) {
+        String filename = file.getOriginalFilename();
+        return "Word document detected: " + filename + "\n" +
+                "For full Word support, add Apache POI dependency to your project.";
+    }
+
+    /**
+     * Clean extracted text
+     */
     private String cleanExtractedText(String text) {
         if (text == null || text.isEmpty()) {
             return "";
         }
-
         String cleaned = text.replaceAll("\\s+", " ");
-        cleaned = cleaned.replaceAll("[^\\w\\s$%,\\.\\-:/(\\)]", "");
         cleaned = cleaned.trim();
-
         return cleaned;
     }
 
-    public void processImageWithMetadata(MultipartFile image) {
-        try {
-            Map<String, Object> metadata = new HashMap<>();
-
-            try (InputStream inputStream = image.getInputStream()) {
-                com.drew.imaging.ImageMetadataReader.readMetadata(inputStream)
-                        .getDirectories()
-                        .forEach(directory -> directory.getTags()
-                                .forEach(tag -> metadata.put(
-                                        directory.getName() + ":" + tag.getTagName(),
-                                        tag.getDescription())));
-            } catch (Exception e) {
-                log.warn("Could not extract image metadata: {}", e.getMessage());
-            }
-
-            String extractedText = extractTextFromImage(image);
-            metadata.put("extractedText", extractedText);
-
-            Document doc = new Document(extractedText, metadata);
-            vectorStore.add(List.of(doc));
-
-            log.info("✅ Image processed with metadata: {}", metadata.keySet());
-
-        } catch (Exception e) {
-            log.error("Error processing image with metadata", e);
+    /**
+     * Get file extension
+     */
+    private String getFileExtension(String fileName) {
+        if (fileName == null || !fileName.contains(".")) {
+            return "";
         }
+        return fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
     }
 }

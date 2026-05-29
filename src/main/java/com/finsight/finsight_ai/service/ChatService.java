@@ -1,132 +1,170 @@
 package com.finsight.finsight_ai.service;
 
+import com.finsight.finsight_ai.model.ChatMemoryMessage;
 import com.finsight.finsight_ai.model.ChatResponse;
+import com.finsight.finsight_ai.model.ChartData;
+import com.finsight.finsight_ai.service.memory.MemoryService;
+import com.finsight.finsight_ai.service.orchestrator.AIResponseService;
+import com.finsight.finsight_ai.service.parser.ResponseParserService;
+import com.finsight.finsight_ai.service.prompt.FinancialPrompts;
+import com.finsight.finsight_ai.service.prompt.PromptBuilderService;
+import com.finsight.finsight_ai.service.retrieval.RetrievalService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;  // ADD THIS for logging
-import org.springframework.ai.chat.client.ChatClient;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
-import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
-import com.fasterxml.jackson.databind.ObjectMapper;  // CORRECT import
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
-@Slf4j  // ADD THIS for logging support
+@Slf4j
 public class ChatService {
 
-    private final ChatClient.Builder chatClientBuilder;
-    private final VectorStore vectorStore;
+    private final RetrievalService retrievalService;
+    private final PromptBuilderService promptBuilderService;
+    private final AIResponseService aiResponseService;
+    private final ResponseParserService responseParserService;
+    private final MemoryService memoryService;
 
-    public ChatResponse askQuestion(String question) {
+    public ChatResponse askQuestion(
+            String conversationId,
+            String userMessage,
+            String systemMessage
+    ) {
+
         try {
-            // Step 1 - Search similar documents from the vector store
-            List<Document> documents = vectorStore.similaritySearch(
-                    SearchRequest.builder()
-                            .query(question)
-                            .topK(3)
-                            .build()
-            );
+            log.info("Processing question: {}", userMessage);
 
-            // Step 2 - Combine retrieved context
-            String context = documents.stream()
-                    .map(Document::getText)
-                    .collect(Collectors.joining("\n"));
+            if (userMessage == null || userMessage.trim().isEmpty()) {
+                return new ChatResponse(
+                        "User message cannot be empty.",
+                        "none",
+                        List.of()
+                );
+            }
 
-            // Step 3 - Build RAG Prompt
-            String prompt = buildPrompt(context, question);
+            // Get conversation memory
+            List<ChatMemoryMessage> history = memoryService.getConversationHistory(conversationId);
+            String memoryContext = promptBuilderService.buildConversationMemory(history);
 
-            // Step 4 - Call the Chat API
-            ChatClient chatClient = chatClientBuilder.build();
+            // Retrieve relevant documents
+            List<Document> documents = retrievalService.retrieveRelevantDocuments(userMessage);
+            log.info("Retrieved {} relevant documents", documents.size());
 
-            String aiResponse = chatClient.prompt()
-                    .user(prompt)
-                    .call()
-                    .content();
+            // Build RAG context
+            String ragContext = promptBuilderService.buildContext(documents);
 
-            // Step 5 - Parse JSON response
-            return parseAIResponse(aiResponse);
+            // Build user prompt
+            String userPrompt = promptBuilderService.buildUserPrompt(memoryContext, ragContext, userMessage);
+
+            // Build system prompt
+            String finalSystemPrompt = buildFinalSystemPrompt(systemMessage);
+
+            // Save user message
+            memoryService.addMessage(conversationId, "USER", userMessage);
+
+            // Get AI response
+            String aiRawResponse = aiResponseService.getAIResponse(finalSystemPrompt, userPrompt);
+            log.debug("Raw AI Response: {}", aiRawResponse);
+
+            // Parse AI response
+            ChatResponse parsedResponse = responseParserService.parseAIResponse(aiRawResponse);
+            log.debug("Parsed AI Response: {}", parsedResponse);
+
+            // VALIDATE AND CLEAN CHART DATA
+            parsedResponse = validateAndCleanChartData(parsedResponse);
+
+            // Save AI response
+            memoryService.addMessage(conversationId, "ASSISTANT", parsedResponse.getAnswer());
+
+            return parsedResponse;
 
         } catch (Exception e) {
-            // FIXED: Use logging instead of printStackTrace()
-            log.error("Error processing question: {}", question, e);
-            return new ChatResponse(
-                    "Failed to process AI response: " + e.getMessage(),
-                    "none",
-                    List.of()
-            );
+            log.error("Error while processing question", e);
+            return createFallbackResponse();
         }
     }
 
-    private String buildPrompt(String context, String question) {
-        return """
-You are an AI Financial Analyst.
-
-You MUST answer ONLY in valid JSON format.
-
-Rules:
-1. Return ONLY valid JSON
-2. No markdown
-3. No explanation outside JSON
-4. Extract chart data dynamically from financial context
-5. If no chart data available return empty array
-
-Required JSON Format:
-
-{
-  "answer": "text response",
-  "chartType": "line/bar/pie/forecast/none",
-  "chartData": [
-    {
-      "year": "2020",
-      "value": 10.0
-    }
-  ]
-}
-
-Financial Data:
-%s
-
-User Question:
-%s
-""".formatted(context, question);
+    public ChatResponse askQuestion(String conversationId, String userMessage) {
+        return askQuestion(conversationId, userMessage, null);
     }
 
-    private ChatResponse parseAIResponse(String aiResponse) {
-        try {
-            // EXTRACTED: Method to clean the response
-            String cleanedResponse = cleanJsonResponse(aiResponse);
-
-            ObjectMapper mapper = new ObjectMapper();
-            return mapper.readValue(cleanedResponse, ChatResponse.class);
-
-        } catch (Exception e) {
-            log.error("Failed to parse AI response: {}", aiResponse, e);
-            return new ChatResponse(
-                    "Error parsing AI response",
-                    "none",
-                    List.of()
-            );
+    /**
+     * Validate and clean chart data - removes null values and ensures data quality
+     */
+    private ChatResponse validateAndCleanChartData(ChatResponse response) {
+        if (response.getChartData() == null || response.getChartData().isEmpty()) {
+            if (response.getChartType() == null || "none".equals(response.getChartType())) {
+                return response;
+            }
+            response.setChartType("none");
+            return response;
         }
+
+        // Filter out chart data entries with null values
+        List<ChartData> validChartData = response.getChartData().stream()
+                .filter(data -> {
+                    if (data == null || data.getYear() == null) {
+                        return false;
+                    }
+                    if (data.getValue() == null) {
+                        log.debug("Removing null value for year: {}", data.getYear());
+                        return false;
+                    }
+                    return true;
+                })
+                .collect(Collectors.toList());
+
+        // If all data was invalid, set to empty
+        if (validChartData.isEmpty()) {
+            response.setChartData(new ArrayList<>());
+            response.setChartType("none");
+            log.debug("All chart data was invalid, cleared chartData");
+        }
+        // If some data was removed, update the response
+        else if (validChartData.size() != response.getChartData().size()) {
+            response.setChartData(validChartData);
+            log.debug("Removed {} invalid chart data entries",
+                    response.getChartData().size() - validChartData.size());
+
+            // Optionally update answer to mention omitted data
+            String originalAnswer = response.getAnswer();
+            if (!originalAnswer.contains("chart data omitted")) {
+                response.setAnswer(originalAnswer + " (Note: Some years without data were omitted from the chart.)");
+            }
+        }
+
+        return response;
     }
 
-    // EXTRACTED: Method to clean JSON response from markdown
-    private String cleanJsonResponse(String aiResponse) {
-        String cleaned = aiResponse.trim();
+    /**
+     * Build final system prompt
+     */
+    private String buildFinalSystemPrompt(String customSystemMessage) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(FinancialPrompts.FINANCIAL_SYSTEM_PROMPT);
 
-        if (cleaned.startsWith("```json")) {
-            cleaned = cleaned.substring(7);
-        }
-        if (cleaned.startsWith("```")) {
-            cleaned = cleaned.substring(3);
-        }
-        if (cleaned.endsWith("```")) {
-            cleaned = cleaned.substring(0, cleaned.length() - 3);
+        if (customSystemMessage != null && !customSystemMessage.trim().isEmpty()) {
+            sb.append("\n\n");
+            sb.append("ADDITIONAL INSTRUCTION FROM USER:\n");
+            sb.append(customSystemMessage);
+            sb.append("\n\nPlease incorporate this instruction while maintaining the JSON output format.");
         }
 
-        return cleaned.trim();
+        return sb.toString();
+    }
+
+    /**
+     * Generic fallback response
+     */
+    private ChatResponse createFallbackResponse() {
+        return new ChatResponse(
+                "I encountered an error while processing your request. Please try again.",
+                "none",
+                List.of()
+        );
     }
 }
