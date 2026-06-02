@@ -9,6 +9,8 @@ import com.finsight.finsight_ai.service.parser.ResponseParserService;
 import com.finsight.finsight_ai.service.prompt.FinancialPrompts;
 import com.finsight.finsight_ai.service.prompt.PromptBuilderService;
 import com.finsight.finsight_ai.service.retrieval.RetrievalService;
+import com.finsight.finsight_ai.service.search.SearchRoutingService;
+import com.finsight.finsight_ai.service.search.TavilySearchService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -28,6 +30,8 @@ public class ChatService {
     private final AIResponseService aiResponseService;
     private final ResponseParserService responseParserService;
     private final MemoryService memoryService;
+    private final TavilySearchService tavilySearchService;
+    private final SearchRoutingService searchRoutingService;
 
     public ChatResponse askQuestion(
             String conversationId,
@@ -51,14 +55,52 @@ public class ChatService {
             String memoryContext = promptBuilderService.buildConversationMemory(history);
 
             // Retrieve relevant documents
-            List<Document> documents = retrievalService.retrieveRelevantDocuments(userMessage);
+            String retrievalQuery =
+                    retrievalService
+                            .prepareRetrievalQuery(
+                                    userMessage
+                            );
+
+            List<Document> documents =
+                    retrievalService
+                            .retrieveRelevantDocuments(
+                                    retrievalQuery
+                            );
             log.info("Retrieved {} relevant documents", documents.size());
 
             // Build RAG context
             String ragContext = promptBuilderService.buildContext(documents);
 
             // Build user prompt
-            String userPrompt = promptBuilderService.buildUserPrompt(memoryContext, ragContext, userMessage);
+            String internetContext = "";
+
+            if (searchRoutingService
+                    .shouldUseInternetSearch(
+                            userMessage
+                    )) {
+
+                internetContext =
+                        tavilySearchService.search(
+                                userMessage
+                        );
+
+                log.info(
+                        "Internet Search Used"
+                );
+                log.info(
+                        "Internet Context: {}",
+                        internetContext
+                );
+            }
+
+            String userPrompt =
+                    promptBuilderService.buildUserPrompt(
+                            memoryContext,
+                            ragContext,
+                            internetContext,
+                            userMessage
+                    );
+
 
             // Build system prompt
             String finalSystemPrompt = buildFinalSystemPrompt(systemMessage);

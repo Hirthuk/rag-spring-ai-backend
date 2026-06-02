@@ -54,7 +54,7 @@ public class ResponseParserService {
                 response.setChartType("none");
             }
 
-            // Extract chartData with dynamic field handling
+            // Extract chartData with dynamic field handling and number formatting
             ArrayList<ChartData> chartDataList = new ArrayList<>();
 
             if (rootNode.has("chartData") && rootNode.get("chartData").isArray()) {
@@ -76,15 +76,15 @@ public class ResponseParserService {
                         JsonNode value = field.getValue();
 
                         if (!key.equals("year") && value.isNumber() && !value.isNull()) {
-                            // Convert to Double
-                            numericValue = value.asDouble();
+                            // Convert to Double and format properly
+                            numericValue = formatNumberToLong(value);
                             numericKey = key;
                             break; // Take the first numeric field found
                         }
                     }
 
                     if (numericValue != null) {
-                        // Create ChartData with the Double value
+                        // Create ChartData with the formatted Double value
                         chartDataList.add(new ChartData(year, numericValue));
                         log.debug("Added chart data: year={}, value={}, originalKey={}", year, numericValue, numericKey);
                     } else {
@@ -98,6 +98,9 @@ public class ResponseParserService {
             // Validate, clean, and fix response
             validateAndFixResponse(response);
             response = cleanChartData(response);
+
+            // NEW: Ensure chart numbers are properly formatted for frontend
+            response = formatChartNumbersForFrontend(response);
 
             log.debug("Parsed AI Response - Answer: {}, ChartType: {}, ChartDataSize: {}",
                     response.getAnswer(), response.getChartType(), response.getChartData().size());
@@ -148,7 +151,7 @@ public class ResponseParserService {
                             JsonNode value = field.getValue();
 
                             if (!key.equals("year") && value.isNumber() && !value.isNull()) {
-                                numericValue = value.asDouble();
+                                numericValue = formatNumberToLong(value);
                                 break;
                             }
                         }
@@ -162,6 +165,7 @@ public class ResponseParserService {
                 response.setChartData(chartDataList);
                 validateAndFixResponse(response);
                 response = cleanChartData(response);
+                response = formatChartNumbersForFrontend(response);
 
                 return response;
             }
@@ -173,6 +177,75 @@ public class ResponseParserService {
          * STRATEGY 3 - Convert plain text response
          */
         return createResponseFromNaturalLanguage(aiResponse);
+    }
+
+    /**
+     * NEW METHOD: Format numbers to proper whole numbers for frontend
+     * Converts scientific notation (1.77E10) to whole numbers (17700000000)
+     */
+    private Double formatNumberToLong(JsonNode numberNode) {
+        if (numberNode == null || numberNode.isNull()) {
+            return null;
+        }
+
+        try {
+            if (numberNode.isNumber()) {
+                if (numberNode.isDouble()) {
+                    double doubleValue = numberNode.asDouble();
+                    // Convert to long and back to double to remove decimal places
+                    // This handles 1.77E10 -> 17700000000.0
+                    long longValue = (long) doubleValue;
+                    return (double) longValue;
+                } else if (numberNode.isLong() || numberNode.isInt()) {
+                    return (double) numberNode.asLong();
+                }
+            } else if (numberNode.isTextual()) {
+                String textValue = numberNode.asText();
+                try {
+                    // Try parsing as long first
+                    long longValue = Long.parseLong(textValue);
+                    return (double) longValue;
+                } catch (NumberFormatException e) {
+                    // Try parsing as double (for scientific notation like "1.77E10")
+                    double doubleValue = Double.parseDouble(textValue);
+                    long longValue = (long) doubleValue;
+                    return (double) longValue;
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to format number: {}", e.getMessage());
+        }
+
+        return null;
+    }
+
+    /**
+     * NEW METHOD: Format chart numbers specifically for frontend display
+     * Ensures numbers are proper whole values (e.g., 14100000000 not 1.41E10)
+     */
+    private ChatResponse formatChartNumbersForFrontend(ChatResponse response) {
+        if (response.getChartData() == null || response.getChartData().isEmpty()) {
+            return response;
+        }
+
+        List<ChartData> formattedChartData = response.getChartData().stream()
+                .map(data -> {
+                    if (data.getValue() != null) {
+                        // Convert scientific notation to whole number
+                        double rawValue = data.getValue();
+                        long wholeValue = (long) rawValue;
+                        // Only convert if the number is large enough (millions or more)
+                        if (wholeValue > 0 && rawValue != wholeValue) {
+                            log.debug("Formatting number: {} -> {}", rawValue, (double) wholeValue);
+                            return new ChartData(data.getYear(), (double) wholeValue);
+                        }
+                    }
+                    return data;
+                })
+                .collect(Collectors.toList());
+
+        response.setChartData(formattedChartData);
+        return response;
     }
 
     /**

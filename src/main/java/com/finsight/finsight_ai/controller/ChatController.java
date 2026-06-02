@@ -3,6 +3,7 @@ package com.finsight.finsight_ai.controller;
 import com.finsight.finsight_ai.model.ChatResponse;
 import com.finsight.finsight_ai.model.FrontendRequest;
 import com.finsight.finsight_ai.service.ChatService;
+import com.finsight.finsight_ai.service.search.TavilySearchService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -14,7 +15,7 @@ import org.springframework.web.bind.annotation.*;
 public class ChatController {
 
     private final ChatService chatService;
-
+    private final TavilySearchService tavilySearchService;
     @PostMapping  // Changed from @GetMapping to @PostMapping
     public ChatResponse chat(@RequestBody FrontendRequest request) {
         String systemMessage = request.getSystemMessage();
@@ -24,5 +25,11 @@ public class ChatController {
                 userMessage, systemMessage != null && !systemMessage.isEmpty());
 
         return chatService.askQuestion(conversationId, userMessage, systemMessage);
+    }
+
+    @PostMapping("/tavily")
+    public String TavilyResponse(@RequestBody FrontendRequest request) {
+        String userMessage = request.getUserMessage();
+        return tavilySearchService.search(userMessage);
     }
 }

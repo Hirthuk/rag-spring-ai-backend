@@ -9,6 +9,7 @@ import net.sourceforge.tess4j.TesseractException;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.springframework.ai.chroma.vectorstore.ChromaApi;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -19,9 +20,13 @@ import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.InputStream;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.WorkbookFactory;
 
 @Service
 @RequiredArgsConstructor
@@ -30,13 +35,13 @@ public class UploadService {
 
     private final VectorStore vectorStore;
     private final ObjectMapper objectMapper = new ObjectMapper();
-
+    private final ChromaApi chromaApi;
+    private final DocumentLoaderService documentLoaderService;
     // Supported image formats
     private static final Set<String> SUPPORTED_IMAGE_FORMATS = Set.of(
             "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"
     );
 
-    // Initialize Tesseract OCR
     // Initialize Tesseract OCR
     private Tesseract getTesseractInstance() {
         // 1. Force JNA to look in the Homebrew directory for the native library
@@ -55,6 +60,7 @@ public class UploadService {
 
     public void processFile(MultipartFile file) {
         try {
+
             String fileName = file.getOriginalFilename();
             String contentType = file.getContentType();
             String fileExtension = getFileExtension(fileName);
@@ -63,9 +69,18 @@ public class UploadService {
                     fileName, contentType, file.getSize(), fileExtension);
 
             String extractedText;
-            Map<String, Object> metadata = new HashMap<>();
+            Map<String,Object> metadata =
+                    new HashMap<>();
 
-            metadata.put("fileName", fileName);
+            metadata.put(
+                    "fileName",
+                    file.getOriginalFilename()
+            );
+
+            metadata.put(
+                    "source",
+                    "upload"
+            );
             metadata.put("fileType", contentType);
             metadata.put("fileExtension", fileExtension);
             metadata.put("fileSize", file.getSize());
@@ -111,9 +126,28 @@ public class UploadService {
 
             } else if (fileExtension.equalsIgnoreCase("xlsx") ||
                     fileExtension.equalsIgnoreCase("xls")) {
-                extractedText = extractTextFromExcel(file);
-                metadata.put("documentType", "excel");
-                log.info("Extracted {} characters from Excel", extractedText.length());
+
+                metadata.put(
+                        "documentType",
+                        "excel"
+                );
+
+                List<Document> companyDocuments =
+                        extractCompanyDocumentsFromExcel(
+                                file,
+                                metadata
+                        );
+
+                vectorStore.add(
+                        companyDocuments
+                );
+
+                log.info(
+                        "Stored {} company documents from Excel",
+                        companyDocuments.size()
+                );
+
+                return;
 
             } else if (fileExtension.equalsIgnoreCase("html") ||
                     fileExtension.equalsIgnoreCase("htm")) {
@@ -157,11 +191,48 @@ public class UploadService {
         }
     }
 
+    public String resetAndReload() {
+
+        try {
+
+            chromaApi.deleteCollection(
+                    "default_tenant",    // 1. tenantName
+                    "default_database",  // 2. databaseName
+                    "financial-docs"     // 3. collectionName
+            );
+
+            documentLoaderService.loadDocuments();
+
+            return "Vector store reset successfully.";
+
+        } catch (Exception e) {
+
+            log.error(
+                    "Failed to reset vector store",
+                    e
+            );
+
+            return "Failed to reset vector store.";
+        }
+    }
+
     /**
      * Extract text from image with WebP support
      */
     private String extractTextFromImage(MultipartFile file) {
         try (InputStream inputStream = file.getInputStream()) {
+            Map<String,Object> metadata =
+                    new HashMap<>();
+
+            metadata.put(
+                    "fileName",
+                    file.getOriginalFilename()
+            );
+
+            metadata.put(
+                    "source",
+                    "upload"
+            );
             BufferedImage image = null;
             String fileName = file.getOriginalFilename();
             String fileExtension = getFileExtension(fileName);
@@ -211,6 +282,7 @@ public class UploadService {
         try {
             // Try to read using standard ImageIO with webp-imageio plugin
             // If plugin is not available, this will return null
+
             return ImageIO.read(new ByteArrayInputStream(imageBytes));
         } catch (Exception e) {
             log.warn("WebP decoding failed: {}", e.getMessage());
@@ -249,6 +321,18 @@ public class UploadService {
      */
     private String extractTextFromPdf(MultipartFile file) {
         try (InputStream inputStream = file.getInputStream()) {
+            Map<String,Object> metadata =
+                    new HashMap<>();
+
+            metadata.put(
+                    "fileName",
+                    file.getOriginalFilename()
+            );
+
+            metadata.put(
+                    "source",
+                    "upload"
+            );
             PDDocument document = Loader.loadPDF(inputStream.readAllBytes());
             PDFTextStripper stripper = new PDFTextStripper();
             String extractedText = stripper.getText(document);
@@ -261,18 +345,181 @@ public class UploadService {
     }
 
     /**
-     * Extract text from Excel files
+     * Extract company documents from Excel - each row becomes a separate document
      */
-    private String extractTextFromExcel(MultipartFile file) {
-        try {
-            // For full Excel support, add Apache POI dependency
-            return "Excel file detected: " + file.getOriginalFilename() + "\n" +
-                    "Size: " + file.getSize() + " bytes\n" +
-                    "Please ensure Apache POI is configured for full text extraction.";
+    private List<Document> extractCompanyDocumentsFromExcel(
+            MultipartFile file,
+            Map<String, Object> baseMetadata
+    ) {
+
+        List<Document> documents =
+                new ArrayList<>();
+
+        try (
+                Workbook workbook =
+                        WorkbookFactory.create(
+                                file.getInputStream()
+                        )
+        ) {
+
+            Sheet sheet =
+                    workbook.getSheetAt(0);
+
+            Iterator<Row> rows =
+                    sheet.iterator();
+
+            if (!rows.hasNext()) {
+
+                return documents;
+            }
+
+            // Skip header row
+            rows.next();
+
+            while (rows.hasNext()) {
+
+                Row row = rows.next();
+
+                if (row.getPhysicalNumberOfCells() < 11) {
+
+                    continue;
+                }
+
+                String companyText =
+                        buildCompanyDocument(
+                                row
+                        );
+
+                Map<String,Object> metadata =
+                        new HashMap<>(
+                                baseMetadata
+                        );
+
+                metadata.put(
+                        "companyName",
+                        getCellValue(
+                                row.getCell(0)
+                        )
+                );
+
+                metadata.put(
+                        "ticker",
+                        getCellValue(
+                                row.getCell(1)
+                        )
+                );
+
+                metadata.put(
+                        "sector",
+                        getCellValue(
+                                row.getCell(2)
+                        )
+                );
+
+                Document companyDocument =
+                        new Document(
+                                companyText,
+                                metadata
+                        );
+
+                documents.add(
+                        companyDocument
+                );
+            }
+
+            return documents;
+
         } catch (Exception e) {
-            log.error("Error processing Excel: {}", file.getOriginalFilename(), e);
+
+            throw new RuntimeException(
+                    "Failed to process Excel",
+                    e
+            );
+        }
+    }
+
+    private String buildCompanyDocument(
+            Row row
+    ) {
+
+        String company =
+                getCellValue(row.getCell(0));
+
+        String fiscalYear =
+                getCellValue(row.getCell(3));
+
+        String revenue =
+                getCellValue(row.getCell(4));
+
+        String netProfit =
+                getCellValue(row.getCell(8));
+
+        String margin =
+                getCellValue(row.getCell(9));
+
+        return """
+                Company Name: %s
+
+                Ticker Symbol: %s
+
+                Sector: %s
+
+                Fiscal Year: %s
+
+                Revenue: %s Million USD
+
+                Cost Of Goods Sold: %s Million USD
+
+                Operating Expenses: %s Million USD
+
+                EBITDA: %s Million USD
+
+                Net Profit: %s Million USD
+
+                Profit Margin: %s Percent
+
+                Earnings Per Share: %s
+
+                Financial Summary:
+
+                %s generated revenue of %s million USD
+                and net profit of %s million USD
+                with profit margin of %s percent
+                during fiscal year %s.
+                """
+                .formatted(
+                        company,
+                        getCellValue(row.getCell(1)),
+                        getCellValue(row.getCell(2)),
+                        fiscalYear,
+                        revenue,
+                        getCellValue(row.getCell(5)),
+                        getCellValue(row.getCell(6)),
+                        getCellValue(row.getCell(7)),
+                        netProfit,
+                        margin,
+                        getCellValue(row.getCell(10)),
+                        company,
+                        revenue,
+                        netProfit,
+                        margin,
+                        fiscalYear
+                );
+    }
+
+    private String getCellValue(
+            Cell cell
+    ) {
+        if (cell == null) {
             return "";
         }
+
+        return switch (cell.getCellType()) {
+            case STRING -> cell.getStringCellValue();
+            case NUMERIC -> String.valueOf(cell.getNumericCellValue());
+            case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
+            default -> "";
+        };
     }
 
     /**

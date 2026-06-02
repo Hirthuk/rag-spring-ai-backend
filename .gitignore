@@ -14,6 +14,7 @@ financial-docs
 .springBeans
 .sts4-cache
 .resources/financial-docs
+*.application.properties
 src/main/resources/financial-docs
 ### IntelliJ IDEA ###
 .idea
@@ -21,6 +22,8 @@ src/main/resources/financial-docs
 *.iml
 *.ipr
 .target
+*.DS_Store
+out/
 ### NetBeans ###
 /nbproject/private/
 /nbbuild/

@@ -120,4 +120,81 @@ public class PromptBuilderService {
 
         return sb.toString();
     }
+
+    public String buildUserPrompt(
+            String memoryContext,
+            String ragContext,
+            String internetContext,
+            String userMessage
+    ) {
+
+        StringBuilder sb =
+                new StringBuilder();
+
+        /*
+         * MEMORY
+         */
+        if (memoryContext != null &&
+                !memoryContext.isBlank()) {
+
+            sb.append(memoryContext);
+        }
+
+        /*
+         * RAG CONTEXT
+         */
+        if (ragContext != null &&
+                !ragContext.isBlank()) {
+
+            sb.append("""
+                RETRIEVED DOCUMENT CONTEXT:
+
+                """);
+
+            sb.append(ragContext);
+
+            sb.append("\n\n");
+        }
+
+        /*
+         * INTERNET CONTEXT
+         */
+        if (internetContext != null &&
+                !internetContext.isBlank()) {
+
+            sb.append("""
+                INTERNET SEARCH RESULTS:
+
+                """);
+
+            sb.append(internetContext);
+
+            sb.append("\n\n");
+        }
+
+        /*
+         * QUESTION
+         */
+        sb.append("""
+            CURRENT USER QUESTION:
+
+            """);
+
+        sb.append(userMessage);
+
+        sb.append("""
+
+            IMPORTANT:
+
+            - Use retrieved documents if available
+            - Use internet search results if available
+            - Use conversation history if relevant
+            - Prefer document context over internet context
+            - If information conflicts, mention it
+            - Return ONLY valid JSON
+            """);
+
+        return sb.toString();
+    }
+
 }
