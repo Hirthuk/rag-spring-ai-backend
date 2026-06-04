@@ -16,9 +16,13 @@ public class PromptBuilderService {
     public String buildContext(
             List<Document> documents
     ) {
+        if (documents == null || documents.isEmpty()) {
+            return "";
+        }
 
         return documents.stream()
                 .map(Document::getText)
+                .filter(text -> text != null && !text.isBlank())
                 .collect(
                         Collectors.joining(
                                 "\n\n---\n\n"

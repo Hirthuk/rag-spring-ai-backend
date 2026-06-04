@@ -9,6 +9,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Optional;
+
 @RestController
 @RequestMapping("/api/vectors")
 @RequiredArgsConstructor
@@ -16,15 +18,19 @@ import org.springframework.web.bind.annotation.RestController;
 @Slf4j
 public class VectorController {
 
-    private final UploadService uploadService;
-    private final ChromaApi chromaApi;
+    private final Optional<UploadService> uploadService;
+    private final Optional<ChromaApi> chromaApi;
 
     @PostMapping("/reload")
     public String reloadVectorDatabase() {
+        if (chromaApi.isEmpty()) {
+            return "Vector store not available - Chroma may not be configured.";
+        }
+        
         try {
             // First, try to delete the collection if it exists
             try {
-                chromaApi.deleteCollection(
+                chromaApi.get().deleteCollection(
                         "default_tenant",
                         "default_database",
                         "financial-docs"
@@ -43,6 +49,10 @@ public class VectorController {
 
     @PostMapping("/reset-hard")
     public String hardResetVectorDatabase() {
+        if (chromaApi.isEmpty()) {
+            return "Vector store not available - cannot perform hard reset.";
+        }
+        
         try {
             // Try to delete all possible collections
             String[] tenants = {"default_tenant", "", null};
@@ -54,7 +64,7 @@ public class VectorController {
                 for (String database : databases) {
                     for (String collection : collections) {
                         try {
-                            chromaApi.deleteCollection(tenant, database, collection);
+                            chromaApi.get().deleteCollection(tenant, database, collection);
                             deletedCount++;
                             log.info("Deleted collection: tenant={}, database={}, collection={}",
                                     tenant, database, collection);
@@ -78,8 +88,11 @@ public class VectorController {
 
     @PostMapping("/collections")
     public Object collections() {
+        if (chromaApi.isEmpty()) {
+            return "Vector store not available - cannot list collections.";
+        }
 
-        return chromaApi.listCollections(
+        return chromaApi.get().listCollections(
                 "default_tenant",
                 "default_database"
         );

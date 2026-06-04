@@ -7,6 +7,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.reader.TextReader;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
@@ -14,6 +15,7 @@ import java.io.File;
 import java.util.List;
 
 @Service
+@ConditionalOnBean(VectorStore.class)
 @RequiredArgsConstructor
 @Slf4j
 public class DocumentLoaderService {

@@ -2,26 +2,31 @@ package com.finsight.finsight_ai.controller;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Optional;
+
 @RestController
-@RequestMapping("/api/test")
 @RequiredArgsConstructor
 public class BedrockTestController {
 
-    private final ChatClient.Builder chatClientBuilder;
+    private final ChatModel chatModel;
 
-    @GetMapping("/claude")
-    public String testClaude() {
+    @GetMapping("/test-bedrock")
+    public String test() {
 
-        ChatClient chatClient =
-                chatClientBuilder.build();
+        Prompt prompt = new Prompt("Say hello");
 
-        return chatClient.prompt()
-                .user("Say hello from Claude")
-                .call()
-                .content();
+        ChatResponse response =
+                chatModel.call(prompt);
+
+        return response.getResult()
+                .getOutput()
+                .getText();
     }
 }

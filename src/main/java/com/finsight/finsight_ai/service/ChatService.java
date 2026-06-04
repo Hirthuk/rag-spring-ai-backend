@@ -11,27 +11,44 @@ import com.finsight.finsight_ai.service.prompt.PromptBuilderService;
 import com.finsight.finsight_ai.service.retrieval.RetrievalService;
 import com.finsight.finsight_ai.service.search.SearchRoutingService;
 import com.finsight.finsight_ai.service.search.TavilySearchService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class ChatService {
 
-    private final RetrievalService retrievalService;
+    private final Optional<RetrievalService> retrievalService;
     private final PromptBuilderService promptBuilderService;
     private final AIResponseService aiResponseService;
     private final ResponseParserService responseParserService;
     private final MemoryService memoryService;
     private final TavilySearchService tavilySearchService;
     private final SearchRoutingService searchRoutingService;
+    
+    public ChatService(
+            Optional<RetrievalService> retrievalService,
+            PromptBuilderService promptBuilderService,
+            AIResponseService aiResponseService,
+            ResponseParserService responseParserService,
+            MemoryService memoryService,
+            TavilySearchService tavilySearchService,
+            SearchRoutingService searchRoutingService
+    ) {
+        this.retrievalService = retrievalService;
+        this.promptBuilderService = promptBuilderService;
+        this.aiResponseService = aiResponseService;
+        this.responseParserService = responseParserService;
+        this.memoryService = memoryService;
+        this.tavilySearchService = tavilySearchService;
+        this.searchRoutingService = searchRoutingService;
+    }
 
     public ChatResponse askQuestion(
             String conversationId,
@@ -50,23 +67,33 @@ public class ChatService {
                 );
             }
 
-            // Get conversation memory
-            List<ChatMemoryMessage> history = memoryService.getConversationHistory(conversationId);
-            String memoryContext = promptBuilderService.buildConversationMemory(history);
+             // Get conversation memory
+             List<ChatMemoryMessage> history = memoryService.getConversationHistory(conversationId);
+             String memoryContext = promptBuilderService.buildConversationMemory(history);
 
-            // Retrieve relevant documents
-            String retrievalQuery =
-                    retrievalService
-                            .prepareRetrievalQuery(
-                                    userMessage
-                            );
+             // Try to retrieve relevant documents if retrieval service is available
+             List<Document> documents = new ArrayList<>();
+             if (retrievalService.isPresent()) {
+                 try {
+                     String retrievalQuery =
+                             retrievalService.get()
+                                     .prepareRetrievalQuery(
+                                             userMessage
+                                     );
 
-            List<Document> documents =
-                    retrievalService
-                            .retrieveRelevantDocuments(
-                                    retrievalQuery
-                            );
-            log.info("Retrieved {} relevant documents", documents.size());
+                     documents =
+                             retrievalService.get()
+                                     .retrieveRelevantDocuments(
+                                             retrievalQuery
+                                     );
+                     log.info("Retrieved {} relevant documents", documents.size());
+                 } catch (Exception e) {
+                     log.warn("Vector store retrieval failed, proceeding without RAG: {}", e.getMessage());
+                     documents = new ArrayList<>();
+                 }
+             } else {
+                 log.info("Vector store retrieval not available, proceeding without RAG");
+             }
 
             // Build RAG context
             String ragContext = promptBuilderService.buildContext(documents);
