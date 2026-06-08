@@ -3,6 +3,7 @@ package com.finsight.finsight_ai.service;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chroma.vectorstore.ChromaApi;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.reader.TextReader;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
@@ -22,7 +23,7 @@ import java.util.List;
 public class DocumentLoaderService {
 
     private final VectorStore vectorStore;
-
+    private final ChromaApi chromaApi;
     @PostConstruct
     public void loadDocuments() {
 
@@ -31,7 +32,7 @@ public class DocumentLoaderService {
         log.info("=================================");
 
         try {
-
+//            clearDocuments();
             loadDefaultDocuments();
 
             log.info("DOCUMENT LOADER FINISHED");
@@ -59,6 +60,11 @@ public class DocumentLoaderService {
 
         log.info("Loading financial documents");
 
+        if(documentAlreadyIndexed()) {
+            log.info("Documents already indexed, skipping loading");
+            return;
+        }
+
         TextReader reportReader =
                 new TextReader(
                         new ClassPathResource(
@@ -68,6 +74,7 @@ public class DocumentLoaderService {
 
         List<Document> docs =
                 reportReader.get();
+
 
         docs.forEach(doc -> {
 
@@ -132,9 +139,49 @@ public class DocumentLoaderService {
                                 .build()
                 );
 
-        log.info(
-                "Verification Search Returned {} Results",
-                verification.size()
-        );
+        log.info("================================");
+
+        verification.forEach(doc -> {
+            log.info("VERIFICATION DOC = {}", doc.getText());
+        });
+
+        log.info("Verification Search Returned {} Results",
+                verification.size());
+
+        log.info("================================");
+    }
+
+//    public void clearDocuments() {
+//        chromaApi.deleteCollection(
+//                "SpringAiTenant",
+//                "SpringAiDatabase",
+//                "financial-docs"
+//        );
+//    }
+
+    private boolean documentAlreadyIndexed() {
+
+        List<Document> results =
+                vectorStore.similaritySearch(
+                        SearchRequest.builder()
+                                .query("company-report.txt")
+                                .topK(1)
+                                .build()
+                );
+        List<Document> results1 =
+                vectorStore.similaritySearch(
+                        SearchRequest.builder()
+                                .query("profit.txt")
+                                .topK(1)
+                                .build()
+                );
+        List<Document> result2 =
+                vectorStore.similaritySearch(
+                        SearchRequest.builder()
+                                .query("revenue.txt")
+                                .topK(1)
+                                .build()
+                );
+        return !results.isEmpty() || !results1.isEmpty() || !result2.isEmpty();
     }
 }

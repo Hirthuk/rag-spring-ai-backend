@@ -113,14 +113,15 @@ public class PromptBuilderService {
 
         sb.append("""
 
-                
-                
-                IMPORTANT:
-                - Use previous conversation if relevant
-                - Use retrieved financial context if relevant
-                - Maintain conversational continuity
-                - Return ONLY valid JSON
-                """);
+IMPORTANT:
+
+- If RETRIEVED DOCUMENT CONTEXT is present, answer primarily from that context.
+- Treat RETRIEVED DOCUMENT CONTEXT as the authoritative source.
+- Do not claim information is unavailable if it exists in the retrieved context.
+- Use INTERNET SEARCH RESULTS only when the retrieved documents do not contain the answer.
+- Return ONLY valid JSON.
+
+""");
 
         return sb.toString();
     }

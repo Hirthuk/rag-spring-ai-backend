@@ -1,5 +1,6 @@
 package com.finsight.finsight_ai.service.retrieval;
 
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -12,13 +13,24 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Service
-@ConditionalOnBean(VectorStore.class)
+//@ConditionalOnBean(VectorStore.class)
 @RequiredArgsConstructor
 @Slf4j
 public class RetrievalService {
 
     private final VectorStore vectorStore;
 
+    @PostConstruct
+    public void debug() {
+        log.info("RETRIEVAL SERVICE CREATED");
+    }
+
+    @PostConstruct
+    public void init() {
+        log.info("================================");
+        log.info("RETRIEVAL SERVICE CREATED");
+        log.info("================================");
+    }
     public List<Document> retrieveRelevantDocuments(
             String query
     ) {
@@ -36,7 +48,8 @@ public class RetrievalService {
                     documents.size(),
                     query
             );
-
+            log.info("QUERY SENT TO VECTOR STORE = [{}]", query);
+            log.info("RESULT COUNT = {}", documents.size());
             documents.forEach(doc -> {
 
                 log.info(
@@ -62,12 +75,6 @@ public class RetrievalService {
             String userMessage
     ) {
 
-        return userMessage
-                .replace("Tell me about", "")
-                .replace("What is", "")
-                .replace("sales growth rate", "")
-                .replace("growth rate", "")
-                .replace("sales", "")
-                .trim();
+        return userMessage;
     }
 }

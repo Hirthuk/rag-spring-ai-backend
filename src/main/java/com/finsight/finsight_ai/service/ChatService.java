@@ -58,6 +58,10 @@ public class ChatService {
 
         try {
             log.info("Processing question: {}", userMessage);
+            log.info(
+                    "RetrievalService present = {}",
+                    retrievalService.isPresent()
+            );
 
             if (userMessage == null || userMessage.trim().isEmpty()) {
                 return new ChatResponse(
@@ -72,6 +76,7 @@ public class ChatService {
              String memoryContext = promptBuilderService.buildConversationMemory(history);
 
              // Try to retrieve relevant documents if retrieval service is available
+
              List<Document> documents = new ArrayList<>();
              if (retrievalService.isPresent()) {
                  try {
@@ -86,7 +91,27 @@ public class ChatService {
                                      .retrieveRelevantDocuments(
                                              retrievalQuery
                                      );
+                     if (!documents.isEmpty()) {
+
+                         log.info(
+                                 "RAG ACTIVE - {} documents supplied to LLM",
+                                 documents.size()
+                         );
+
+                     } else {
+
+                         log.warn(
+                                 "RAG INACTIVE - No documents supplied to LLM"
+                         );
+                     }
                      log.info("Retrieved {} relevant documents", documents.size());
+                     log.info(
+                             "RAG DOCUMENT COUNT = {}",
+                             documents.size()
+                     );
+                     documents.forEach(doc ->
+                             log.info("RAG DOC = {}", doc.getText())
+                     );
                  } catch (Exception e) {
                      log.warn("Vector store retrieval failed, proceeding without RAG: {}", e.getMessage());
                      documents = new ArrayList<>();
@@ -97,6 +122,11 @@ public class ChatService {
 
             // Build RAG context
             String ragContext = promptBuilderService.buildContext(documents);
+
+            log.info("================================");
+            log.info("RAG CONTEXT LENGTH = {}", ragContext.length());
+            log.info("RAG CONTEXT = {}", ragContext);
+            log.info("================================");
 
             // Build user prompt
             String internetContext = "";
@@ -128,6 +158,10 @@ public class ChatService {
                             userMessage
                     );
 
+            log.info("================================");
+            log.info("FINAL USER PROMPT");
+            log.info(userPrompt);
+            log.info("================================");
 
             // Build system prompt
             String finalSystemPrompt = buildFinalSystemPrompt(systemMessage);

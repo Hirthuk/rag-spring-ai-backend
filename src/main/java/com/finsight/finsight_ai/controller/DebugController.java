@@ -8,6 +8,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.context.ApplicationContext;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Arrays;
@@ -45,12 +46,13 @@ public class DebugController {
     }
 
     @GetMapping("/search")
-    public Object search() {
+    public Object search(
+            @RequestParam String query) {
 
         return vectorStore.similaritySearch(
                 SearchRequest.builder()
-                        .query("growth rate")
-                        .topK(3)
+                        .query(query)
+                        .topK(5)
                         .build()
         );
     }
