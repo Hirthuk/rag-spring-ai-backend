@@ -2,6 +2,8 @@ package com.finsight.finsight_ai.controller;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.context.ApplicationContext;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,7 +20,7 @@ public class DebugController {
 
     private final EmbeddingModel embeddingModel;
     private final ApplicationContext context;
-
+    private final VectorStore vectorStore;
     @GetMapping("/embed")
     public String embed() {
 
@@ -42,4 +44,14 @@ public class DebugController {
         return Arrays.toString(beans);
     }
 
+    @GetMapping("/search")
+    public Object search() {
+
+        return vectorStore.similaritySearch(
+                SearchRequest.builder()
+                        .query("growth rate")
+                        .topK(3)
+                        .build()
+        );
+    }
 }

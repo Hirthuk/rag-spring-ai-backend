@@ -27,13 +27,13 @@ public class VectorController {
         if (chromaApi.isEmpty()) {
             return "Vector store not available - Chroma may not be configured.";
         }
-        
+
         try {
             // First, try to delete the collection if it exists
             try {
                 chromaApi.get().deleteCollection(
-                        "default_tenant",
-                        "default_database",
+                        "SpringAiTenant",
+                        "SpringAiDatabase",
                         "financial-docs"
                 );
                 return "✅ Collection deleted. Vector store reset successfully.";
@@ -53,11 +53,11 @@ public class VectorController {
         if (chromaApi.isEmpty()) {
             return "Vector store not available - cannot perform hard reset.";
         }
-        
+
         try {
             // Try to delete all possible collections
-            String[] tenants = {"default_tenant", "", null};
-            String[] databases = {"default_database", "", null};
+            String[] tenants = {"SpringAiTenant", "", null};
+            String[] databases = {"SpringAiDatabase", "", null};
             String[] collections = {"financial-docs", "default", "spring-ai", "vector_store"};
 
             int deletedCount = 0;
@@ -94,8 +94,8 @@ public class VectorController {
         }
 
         return chromaApi.get().listCollections(
-                "default_tenant",
-                "default_database"
+                "SpringAiTenant",
+                "SpringAiDatabase"
         );
     }
 }

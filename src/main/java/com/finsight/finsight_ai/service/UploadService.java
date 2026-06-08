@@ -198,8 +198,8 @@ public class UploadService {
         try {
 
             chromaApi.deleteCollection(
-                    "default_tenant",    // 1. tenantName
-                    "default_database",  // 2. databaseName
+                    "SpringAiTenant",    // 1. tenantName
+                    "SpringAiDatabase",  // 2. databaseName
                     "financial-docs"     // 3. collectionName
             );
 
