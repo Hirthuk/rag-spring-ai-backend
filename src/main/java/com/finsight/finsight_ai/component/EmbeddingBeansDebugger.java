@@ -1,24 +1,20 @@
 package com.finsight.finsight_ai.component;
 
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.ApplicationContext;
-import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
-
-import jakarta.annotation.PostConstruct;
-import java.util.Arrays;
 
 @Component
 @RequiredArgsConstructor
 @Slf4j
-public class BeanInspector {
+public class EmbeddingBeansDebugger {
 
     private final ApplicationContext context;
 
-    @EventListener(ApplicationReadyEvent.class)
-    public void inspect() {
+    @PostConstruct
+    public void printBeans() {
 
         String[] beans =
                 context.getBeanNamesForType(

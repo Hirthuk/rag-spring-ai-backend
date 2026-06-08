@@ -11,7 +11,7 @@ import java.util.List;
 
 @RestController
 @RequiredArgsConstructor
-@RequestMapping("/api/debug")
+@RequestMapping("/debug")
 public class BeanDebugController {
 
     private final ApplicationContext context;
@@ -28,5 +28,24 @@ public class BeanDebugController {
                                 || bean.toLowerCase().contains("bedrock"))
                 .sorted()
                 .toList();
+    }
+
+    @GetMapping("/documentloader")
+    public String documentLoader() {
+
+        String[] beans =
+                context.getBeanNamesForType(
+                        com.finsight.finsight_ai.service.DocumentLoaderService.class
+                );
+
+        return Arrays.toString(beans);
+    }
+
+    @GetMapping("/beans/test")
+    public Object beans1() {
+
+        return Arrays.asList(
+                context.getBeanDefinitionNames()
+        );
     }
 }

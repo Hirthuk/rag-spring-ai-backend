@@ -1,6 +1,7 @@
 package com.finsight.finsight_ai.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationContext;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -10,6 +11,7 @@ import java.util.Map;
 @RestController
 @RequiredArgsConstructor
 public class AwsDebugController {
+    private final ApplicationContext context;
 
     @GetMapping("/aws-debug")
     public Map<String, String> debug() {
@@ -32,5 +34,12 @@ public class AwsDebugController {
         );
 
         return map;
+    }
+
+    @GetMapping("/aws-beans")
+    public Object beans() {
+        return context.getBeansOfType(
+                software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeClient.class
+        ).keySet();
     }
 }

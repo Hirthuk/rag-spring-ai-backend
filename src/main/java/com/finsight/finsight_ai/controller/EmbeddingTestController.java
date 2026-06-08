@@ -20,4 +20,14 @@ public class EmbeddingTestController {
         float[] embedding = embeddingModel.embed("Hello");
         return "Embedding test completed. Vector size: " + embedding.length;
     }
+
+    @GetMapping("/embed")
+    public String test2() {
+
+        var vector = embeddingModel.embed(
+                "Hello world"
+        );
+
+        return "Dimensions = " + vector.length;
+    }
 }

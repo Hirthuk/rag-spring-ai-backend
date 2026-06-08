@@ -3,20 +3,43 @@ package com.finsight.finsight_ai.controller;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.context.ApplicationContext;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Arrays;
+
+
 @RestController
-@ConditionalOnBean(EmbeddingModel.class)
+@RequestMapping("/debug")
 @RequiredArgsConstructor
 public class DebugController {
 
     private final EmbeddingModel embeddingModel;
+    private final ApplicationContext context;
 
-    @GetMapping("/debug/embed")
-    public String test() {
-        embeddingModel.embed("hello");
+    @GetMapping("/embed")
+    public String embed() {
+
+        System.out.println(
+                embeddingModel.getClass().getName()
+        );
+
+        embeddingModel.embed("hello world");
 
         return "success";
     }
+
+    @GetMapping("/vectorstore")
+    public String vectorStore() {
+
+        String[] beans =
+                context.getBeanNamesForType(
+                        org.springframework.ai.vectorstore.VectorStore.class
+                );
+
+        return Arrays.toString(beans);
+    }
+
 }
