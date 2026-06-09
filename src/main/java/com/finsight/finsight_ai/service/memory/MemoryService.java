@@ -28,17 +28,23 @@ public class MemoryService {
             String content
     ) {
 
-        memoryStore
-                .computeIfAbsent(
+        List<ChatMemoryMessage> messages =
+                memoryStore.computeIfAbsent(
                         conversationId,
                         k -> new ArrayList<>()
-                )
-                .add(
-                        new ChatMemoryMessage(
-                                role,
-                                content
-                        )
                 );
+
+        messages.add(
+                new ChatMemoryMessage(
+                        role,
+                        content
+                )
+        );
+
+        // Keep only last 10 messages
+        if (messages.size() > 3) {
+            messages.remove(0);
+        }
     }
 
     /**
