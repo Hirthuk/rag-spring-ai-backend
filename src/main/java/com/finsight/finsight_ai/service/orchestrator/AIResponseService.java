@@ -35,6 +35,8 @@ public class AIResponseService {
                     .user(userPrompt)
                     .call()
                     .content();
+
+            log.info("RAW AI RESPONSE:\n{}", response);
             
             log.debug("AI Response received, length: {}", response != null ? response.length() : 0);
             return response;
