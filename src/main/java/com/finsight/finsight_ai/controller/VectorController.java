@@ -48,7 +48,7 @@ public class VectorController {
         }
     }
 
-    @PostMapping("/reset-hard")
+    @GetMapping("/reset-hard")
     public String hardResetVectorDatabase() {
         if (chromaApi.isEmpty()) {
             return "Vector store not available - cannot perform hard reset.";

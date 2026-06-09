@@ -30,7 +30,7 @@ import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.ss.usermodel.WorkbookFactory;
 
 @Service
-@ConditionalOnBean(VectorStore.class)
+//@ConditionalOnBean(VectorStore.class)
 @RequiredArgsConstructor
 @Slf4j
 public class UploadService {
