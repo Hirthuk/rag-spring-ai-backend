@@ -8,10 +8,7 @@ import com.finsight.finsight_ai.model.ChartData;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -54,8 +51,8 @@ public class ResponseParserService {
                 response.setChartType("none");
             }
 
-            // Extract chartData with dynamic field handling and number formatting
-            ArrayList<ChartData> chartDataList = new ArrayList<>();
+            // Extract chartData with dynamic field handling and convert directly to Map
+            List<Map<String, Object>> chartDataList = new ArrayList<>();
 
             if (rootNode.has("chartData") && rootNode.get("chartData").isArray()) {
                 ArrayNode chartDataArray = (ArrayNode) rootNode.get("chartData");
@@ -68,7 +65,6 @@ public class ResponseParserService {
                     // Find ANY numeric field (growth_rate, profit, revenue, value, etc.)
                     Iterator<Map.Entry<String, JsonNode>> fields = dataPoint.fields();
                     Double numericValue = null;
-                    String numericKey = null;
 
                     while (fields.hasNext()) {
                         Map.Entry<String, JsonNode> field = fields.next();
@@ -76,17 +72,17 @@ public class ResponseParserService {
                         JsonNode value = field.getValue();
 
                         if (!key.equals("year") && value.isNumber() && !value.isNull()) {
-                            // Convert to Double and format properly
                             numericValue = formatNumberToLong(value);
-                            numericKey = key;
-                            break; // Take the first numeric field found
+                            break;
                         }
                     }
 
                     if (numericValue != null) {
-                        // Create ChartData with the formatted Double value
-                        chartDataList.add(new ChartData(year, numericValue));
-                        log.debug("Added chart data: year={}, value={}, originalKey={}", year, numericValue, numericKey);
+                        Map<String, Object> dataMap = new HashMap<>();
+                        dataMap.put("year", year);
+                        dataMap.put("value", numericValue);
+                        chartDataList.add(dataMap);
+                        log.debug("Added chart data: year={}, value={}", year, numericValue);
                     } else {
                         log.warn("No numeric value found for year: {}", year);
                     }
@@ -99,7 +95,7 @@ public class ResponseParserService {
             validateAndFixResponse(response);
             response = cleanChartData(response);
 
-            // NEW: Ensure chart numbers are properly formatted for frontend
+            // Format chart numbers for frontend
             response = formatChartNumbersForFrontend(response);
 
             log.debug("Parsed AI Response - Answer: {}, ChartType: {}, ChartDataSize: {}",
@@ -133,7 +129,7 @@ public class ResponseParserService {
                     response.setChartType("none");
                 }
 
-                ArrayList<ChartData> chartDataList = new ArrayList<>();
+                List<Map<String, Object>> chartDataList = new ArrayList<>();
 
                 if (rootNode.has("chartData") && rootNode.get("chartData").isArray()) {
                     ArrayNode chartDataArray = (ArrayNode) rootNode.get("chartData");
@@ -157,7 +153,10 @@ public class ResponseParserService {
                         }
 
                         if (numericValue != null) {
-                            chartDataList.add(new ChartData(year, numericValue));
+                            Map<String, Object> dataMap = new HashMap<>();
+                            dataMap.put("year", year);
+                            dataMap.put("value", numericValue);
+                            chartDataList.add(dataMap);
                         }
                     }
                 }
@@ -180,7 +179,7 @@ public class ResponseParserService {
     }
 
     /**
-     * NEW METHOD: Format numbers to proper whole numbers for frontend
+     * Format numbers to proper whole numbers for frontend
      * Converts scientific notation (1.77E10) to whole numbers (17700000000)
      */
     private Double formatNumberToLong(JsonNode numberNode) {
@@ -192,8 +191,6 @@ public class ResponseParserService {
             if (numberNode.isNumber()) {
                 if (numberNode.isDouble()) {
                     double doubleValue = numberNode.asDouble();
-                    // Convert to long and back to double to remove decimal places
-                    // This handles 1.77E10 -> 17700000000.0
                     long longValue = (long) doubleValue;
                     return (double) longValue;
                 } else if (numberNode.isLong() || numberNode.isInt()) {
@@ -202,11 +199,9 @@ public class ResponseParserService {
             } else if (numberNode.isTextual()) {
                 String textValue = numberNode.asText();
                 try {
-                    // Try parsing as long first
                     long longValue = Long.parseLong(textValue);
                     return (double) longValue;
                 } catch (NumberFormatException e) {
-                    // Try parsing as double (for scientific notation like "1.77E10")
                     double doubleValue = Double.parseDouble(textValue);
                     long longValue = (long) doubleValue;
                     return (double) longValue;
@@ -220,7 +215,7 @@ public class ResponseParserService {
     }
 
     /**
-     * NEW METHOD: Format chart numbers specifically for frontend display
+     * Format chart numbers specifically for frontend display
      * Ensures numbers are proper whole values (e.g., 14100000000 not 1.41E10)
      */
     private ChatResponse formatChartNumbersForFrontend(ChatResponse response) {
@@ -228,21 +223,25 @@ public class ResponseParserService {
             return response;
         }
 
-        List<ChartData> formattedChartData = response.getChartData().stream()
-                .map(data -> {
-                    if (data.getValue() != null) {
-                        // Convert scientific notation to whole number
-                        double rawValue = data.getValue();
-                        long wholeValue = (long) rawValue;
-                        // Only convert if the number is large enough (millions or more)
-                        if (wholeValue > 0 && rawValue != wholeValue) {
-                            log.debug("Formatting number: {} -> {}", rawValue, (double) wholeValue);
-                            return new ChartData(data.getYear(), (double) wholeValue);
-                        }
-                    }
-                    return data;
-                })
-                .collect(Collectors.toList());
+        List<Map<String, Object>> formattedChartData = new ArrayList<>();
+        for (Map<String, Object> dataPoint : response.getChartData()) {
+            Map<String, Object> formatted = new HashMap<>();
+            formatted.put("year", dataPoint.get("year"));
+
+            Object value = dataPoint.get("value");
+            if (value instanceof Number) {
+                double rawValue = ((Number) value).doubleValue();
+                long wholeValue = (long) rawValue;
+                if (wholeValue > 0 && rawValue != wholeValue) {
+                    formatted.put("value", (double) wholeValue);
+                } else {
+                    formatted.put("value", rawValue);
+                }
+            } else {
+                formatted.put("value", value);
+            }
+            formattedChartData.add(formatted);
+        }
 
         response.setChartData(formattedChartData);
         return response;
@@ -418,6 +417,7 @@ public class ResponseParserService {
 
     /**
      * Clean chart data - remove entries with null or invalid values
+     * Now works directly with List<Map<String, Object>>
      */
     private ChatResponse cleanChartData(ChatResponse response) {
         if (response.getChartData() == null || response.getChartData().isEmpty()) {
@@ -428,14 +428,20 @@ public class ResponseParserService {
         }
 
         // Filter out chart data entries with null values
-        List<ChartData> validChartData = response.getChartData().stream()
+        List<Map<String, Object>> validChartData = response.getChartData().stream()
                 .filter(data -> {
-                    if (data == null || data.getYear() == null) {
-                        log.debug("Removing invalid chart data entry: null data or year");
+                    if (data == null) {
+                        log.debug("Removing invalid chart data entry: null data");
                         return false;
                     }
-                    if (data.getValue() == null) {
-                        log.debug("Removing null value for year: {}", data.getYear());
+                    Object year = data.get("year");
+                    Object value = data.get("value");
+                    if (year == null) {
+                        log.debug("Removing chart data entry with null year");
+                        return false;
+                    }
+                    if (value == null) {
+                        log.debug("Removing null value for year: {}", year);
                         return false;
                     }
                     return true;

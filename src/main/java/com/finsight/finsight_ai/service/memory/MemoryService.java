@@ -1,73 +1,113 @@
 package com.finsight.finsight_ai.service.memory;
 
 import com.finsight.finsight_ai.model.ChatMemoryMessage;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
+@Slf4j
 public class MemoryService {
 
-    /*
-     * conversationId
-     *      ↓
-     * List of chat messages
-     */
-    private final Map<String,
-            List<ChatMemoryMessage>>
-            memoryStore =
-            new ConcurrentHashMap<>();
+    // Limit memory to 6 messages total (3 user + 3 assistant)
+    private static final int MAX_MESSAGES = 6;
+
+    private final Map<String, List<ChatMemoryMessage>> conversations = new ConcurrentHashMap<>();
 
     /**
-     * Save message to memory
+     * Add a message to conversation history
      */
-    public void addMessage(
-            String conversationId,
-            String role,
-            String content
-    ) {
-
-        List<ChatMemoryMessage> messages =
-                memoryStore.computeIfAbsent(
-                        conversationId,
-                        k -> new ArrayList<>()
-                );
-
-        messages.add(
-                new ChatMemoryMessage(
-                        role,
-                        content
-                )
-        );
-
-        // Keep only last 10 messages
-        if (messages.size() > 3) {
-            messages.remove(0);
+    public void addMessage(String conversationId, String role, String content) {
+        // For assistant messages, ensure we're storing ONLY the answer text (not JSON)
+        String cleanContent = content;
+        if ("ASSISTANT".equalsIgnoreCase(role) && content != null && content.trim().startsWith("{")) {
+            cleanContent = extractAnswerFromJson(content);
+            log.debug("Extracted answer from JSON: {}", cleanContent);
         }
+
+        conversations.computeIfAbsent(conversationId, k -> new ArrayList<>());
+        List<ChatMemoryMessage> messages = conversations.get(conversationId);
+
+        // Create ChatMemoryMessage with role and content
+        ChatMemoryMessage message = new ChatMemoryMessage(role, cleanContent);
+        messages.add(message);
+
+        // Enforce max message limit
+        while (messages.size() > MAX_MESSAGES) {
+            ChatMemoryMessage removed = messages.remove(0);
+            log.debug("Removed old message: role={}, content={}", removed.getRole(), removed.getContent());
+        }
+
+        log.debug("Added message to conversation {}. Total messages: {}", conversationId, messages.size());
     }
 
     /**
-     * Get conversation history
+     * Extract just the "answer" field from JSON response
      */
-    public List<ChatMemoryMessage>
-    getConversationHistory(
-            String conversationId
-    ) {
+    private String extractAnswerFromJson(String jsonResponse) {
+        try {
+            // Simple extraction without full JSON parsing
+            int answerStart = jsonResponse.indexOf("\"answer\":");
+            if (answerStart == -1) return jsonResponse;
 
-        return memoryStore.getOrDefault(
-                conversationId,
-                new ArrayList<>()
-        );
+            int valueStart = jsonResponse.indexOf("\"", answerStart + 9) + 1;
+            int valueEnd = jsonResponse.indexOf("\"", valueStart);
+
+            if (valueStart > 0 && valueEnd > valueStart) {
+                return jsonResponse.substring(valueStart, valueEnd);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to extract answer from JSON: {}", e.getMessage());
+        }
+        return jsonResponse;
     }
 
     /**
-     * Clear conversation
+     * Get conversation history (returns List of ChatMemoryMessage)
      */
-    public void clearConversation(
-            String conversationId
-    ) {
+    public List<ChatMemoryMessage> getHistory(String conversationId) {
+        return new ArrayList<>(conversations.getOrDefault(conversationId, new ArrayList<>()));
+    }
 
-        memoryStore.remove(conversationId);
+    /**
+     * Get formatted conversation history for prompt
+     * Returns ONLY text, no JSON structure
+     */
+    public String getFormattedHistory(String conversationId) {
+        List<ChatMemoryMessage> messages = conversations.getOrDefault(conversationId, new ArrayList<>());
+
+        if (messages.isEmpty()) {
+            return "";
+        }
+
+        StringBuilder history = new StringBuilder();
+        history.append("\n==================================================\n");
+        history.append("CONVERSATION HISTORY (Use this for context)\n");
+        history.append("==================================================\n\n");
+
+        for (ChatMemoryMessage msg : messages) {
+            String role = "USER".equals(msg.getRole()) ? "User" : "Assistant";
+            history.append(role).append(": ").append(msg.getContent()).append("\n\n");
+        }
+
+        history.append("==================================================\n");
+        return history.toString();
+    }
+
+    /**
+     * Get raw message count for debugging
+     */
+    public int getMessageCount(String conversationId) {
+        return conversations.getOrDefault(conversationId, new ArrayList<>()).size();
+    }
+
+    /**
+     * Clear conversation history
+     */
+    public void clearHistory(String conversationId) {
+        conversations.remove(conversationId);
+        log.debug("Cleared history for conversation: {}", conversationId);
     }
 }
