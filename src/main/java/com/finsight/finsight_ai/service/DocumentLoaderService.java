@@ -3,6 +3,7 @@ package com.finsight.finsight_ai.service;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chroma.vectorstore.ChromaApi;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.core.io.Resource;
@@ -10,14 +11,23 @@ import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.poi.ss.usermodel.Cell;
@@ -32,6 +42,7 @@ import org.apache.poi.ss.usermodel.WorkbookFactory;
 public class DocumentLoaderService {
 
     private final VectorStore vectorStore;
+    private final ChromaApi chromaApi;
     private final PathMatchingResourcePatternResolver resourceResolver = new PathMatchingResourcePatternResolver();
 
     private static final List<String> SUPPORTED_EXTENSIONS = List.of(
@@ -43,6 +54,15 @@ public class DocumentLoaderService {
     private static final int MIN_CHUNK_SIZE = 100;    // Minimum meaningful chunk size
     private static final int OVERLAP_SIZE = 100;      // Overlap between chunks
 
+    // Duplicate detection
+    private static final String COLLECTION_NAME = "financial-docs";
+    private static final String TENANT_NAME = "SpringAiTenant";
+    private static final String DATABASE_NAME = "SpringAiDatabase";
+    private static final String HASH_TRACKING_FILE = ".document-hashes";
+
+    // Cache for processed file hashes during current session
+    private final Set<String> processedFileHashes = new HashSet<>();
+
     @PostConstruct
     public void loadDocuments() {
         log.info("=================================");
@@ -50,6 +70,9 @@ public class DocumentLoaderService {
         log.info("=================================");
 
         try {
+            // Load existing document hashes from Chroma to prevent duplicates
+            loadExistingDocumentHashes();
+
             List<Resource> allResources = new ArrayList<>();
 
             for (String extension : SUPPORTED_EXTENSIONS) {
@@ -82,18 +105,32 @@ public class DocumentLoaderService {
 
             int successCount = 0;
             int failCount = 0;
+            int skipCount = 0;
 
             for (Resource resource : allResources) {
                 String fileName = resource.getFilename();
-                log.info("Processing file: {}", fileName);
 
                 try {
+                    // Calculate hash for duplicate detection
+                    String fileHash = calculateFileHash(resource);
+
+                    // Check if file already exists in Chroma
+                    if (processedFileHashes.contains(fileHash)) {
+                        log.info("⏭️ Skipping duplicate file: {} (already in Chroma)", fileName);
+                        skipCount++;
+                        continue;
+                    }
+
+                    log.info("Processing file: {} (hash: {})", fileName, fileHash);
+
                     List<Document> documents = extractDocuments(resource);
                     if (!documents.isEmpty()) {
                         // Add documents one by one for better error handling
                         int indexedCount = 0;
                         for (int i = 0; i < documents.size(); i++) {
                             Document doc = documents.get(i);
+                            // Add file hash to metadata for future duplicate detection
+                            doc.getMetadata().put("fileHash", fileHash);
                             if (addDocumentWithRetry(doc, fileName, i, documents.size())) {
                                 indexedCount++;
                             }
@@ -105,6 +142,9 @@ public class DocumentLoaderService {
 
                         if (indexedCount > 0) {
                             successCount++;
+                            // Mark this file hash as processed both in memory and in tracking file
+                            processedFileHashes.add(fileHash);
+                            saveDocumentHash(fileHash);
                             log.info("✅ Successfully indexed {}/{} documents from {}",
                                     indexedCount, documents.size(), fileName);
                         } else {
@@ -122,12 +162,77 @@ public class DocumentLoaderService {
 
             log.info("=================================");
             log.info("DOCUMENT LOADER FINISHED");
-            log.info("Total files: {}, Successful: {}, Failed: {}",
-                    allResources.size(), successCount, failCount);
+            log.info("Total files: {}, Successful: {}, Failed: {}, Skipped (duplicates): {}",
+                    allResources.size(), successCount, failCount, skipCount);
             log.info("=================================");
 
         } catch (Exception e) {
             log.error("Error loading documents from resources", e);
+        }
+    }
+
+    /**
+     * Load existing document hashes from tracking file to prevent re-indexing duplicates
+     */
+    private void loadExistingDocumentHashes() {
+        try {
+            File trackingFile = new File(HASH_TRACKING_FILE);
+
+            if (trackingFile.exists()) {
+                try (BufferedReader reader = new BufferedReader(new FileReader(trackingFile))) {
+                    String line;
+                    int loadedCount = 0;
+                    while ((line = reader.readLine()) != null) {
+                        if (!line.trim().isEmpty()) {
+                            processedFileHashes.add(line.trim());
+                            loadedCount++;
+                        }
+                    }
+                    log.info("Loaded {} document hashes from tracking file - duplicates will be skipped",
+                            loadedCount);
+                }
+            } else {
+                log.info("No existing tracking file found - first time loading documents");
+            }
+        } catch (Exception e) {
+            log.warn("Could not load existing document hashes: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Save document hash to tracking file to prevent re-indexing
+     */
+    private void saveDocumentHash(String hash) {
+        try {
+            File trackingFile = new File(HASH_TRACKING_FILE);
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(trackingFile, true))) {
+                writer.write(hash);
+                writer.newLine();
+            }
+        } catch (Exception e) {
+            log.warn("Could not save document hash to tracking file: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Calculate MD5 hash of file content for duplicate detection
+     */
+    private String calculateFileHash(Resource resource) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] fileBytes = resource.getContentAsByteArray();
+            byte[] hash = md.digest(fileBytes);
+
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (Exception e) {
+            log.warn("Error calculating file hash for {}: {}", resource.getFilename(), e.getMessage());
+            return System.nanoTime() + "_" + resource.getFilename();
         }
     }
 
@@ -587,7 +692,17 @@ public class DocumentLoaderService {
     }
 
     public void reloadDocuments() {
-        log.info("Manual reload triggered - reloading all documents");
+        log.info("Manual reload triggered - clearing cache and tracking file, reloading all documents");
+        processedFileHashes.clear();
+        try {
+            File trackingFile = new File(HASH_TRACKING_FILE);
+            if (trackingFile.exists()) {
+                trackingFile.delete();
+                log.info("Deleted tracking file - will reload all documents");
+            }
+        } catch (Exception e) {
+            log.warn("Could not delete tracking file: {}", e.getMessage());
+        }
         loadDocuments();
     }
 }

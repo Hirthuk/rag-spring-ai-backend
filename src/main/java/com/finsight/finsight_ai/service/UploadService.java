@@ -28,6 +28,11 @@ import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.ss.usermodel.WorkbookFactory;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.XWPFParagraph;
+import org.apache.poi.xwpf.usermodel.XWPFTable;
+import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 
 @Service
 //@ConditionalOnBean(VectorStore.class)
@@ -620,12 +625,91 @@ public class UploadService {
     }
 
     /**
-     * Extract text from Word document
+     * Extract text from Word document (DOCX and DOC formats)
      */
     private String extractTextFromWord(MultipartFile file) {
-        String filename = file.getOriginalFilename();
-        return "Word document detected: " + filename + "\n" +
-                "For full Word support, add Apache POI dependency to your project.";
+        try {
+            String fileName = file.getOriginalFilename();
+            String fileExtension = getFileExtension(fileName);
+
+            if (fileExtension.equalsIgnoreCase("docx")) {
+                return extractTextFromDocx(file);
+            } else if (fileExtension.equalsIgnoreCase("doc")) {
+                return extractTextFromDoc(file);
+            } else {
+                log.warn("Unknown Word document format: {}", fileExtension);
+                return "";
+            }
+        } catch (Exception e) {
+            log.error("Error processing Word document: {}", file.getOriginalFilename(), e);
+            return "";
+        }
+    }
+
+    /**
+     * Extract text from DOCX files using Apache POI XWPF
+     */
+    private String extractTextFromDocx(MultipartFile file) {
+        try (InputStream inputStream = file.getInputStream();
+             XWPFDocument document = new XWPFDocument(inputStream)) {
+
+            StringBuilder content = new StringBuilder();
+
+            for (XWPFParagraph paragraph : document.getParagraphs()) {
+                if (!paragraph.getText().trim().isEmpty()) {
+                    content.append(paragraph.getText()).append("\n");
+                }
+            }
+
+            for (XWPFTable table : document.getTables()) {
+                for (XWPFTableRow row : table.getRows()) {
+                    for (XWPFTableCell cell : row.getTableCells()) {
+                        if (!cell.getText().trim().isEmpty()) {
+                            content.append(cell.getText()).append(" | ");
+                        }
+                    }
+                    content.append("\n");
+                }
+            }
+
+            return cleanExtractedText(content.toString());
+
+        } catch (Exception e) {
+            log.error("Error extracting text from DOCX: {}", file.getOriginalFilename(), e);
+            return "";
+        }
+    }
+
+    /**
+     * Extract text from legacy DOC files using reflection for HWPF
+     * (poi-scratchpad may not always be available, so we use reflection as fallback)
+     */
+    private String extractTextFromDoc(MultipartFile file) {
+        try (InputStream inputStream = file.getInputStream()) {
+            byte[] fileBytes = inputStream.readAllBytes();
+            java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(fileBytes);
+
+            try {
+                Class<?> hwpfDocClass = Class.forName("org.apache.poi.hwpf.HWPFDocument");
+                Class<?> wordExtractorClass = Class.forName("org.apache.poi.hwpf.extractor.WordExtractor");
+
+                Object document = hwpfDocClass.getConstructor(InputStream.class).newInstance(bais);
+                Object extractor = wordExtractorClass.getConstructor(hwpfDocClass).newInstance(document);
+                String text = (String) wordExtractorClass.getMethod("getText").invoke(extractor);
+                wordExtractorClass.getMethod("close").invoke(extractor);
+
+                return cleanExtractedText(text);
+
+            } catch (ClassNotFoundException e) {
+                log.warn("HWPF library not available. .doc file support requires poi-scratchpad dependency.");
+                log.info("Consider converting .doc files to .docx format for better compatibility.");
+                return "";
+            }
+
+        } catch (Exception e) {
+            log.error("Error extracting text from DOC: {}", file.getOriginalFilename(), e);
+            return "";
+        }
     }
 
     /**

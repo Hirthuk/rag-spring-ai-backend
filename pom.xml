@@ -134,6 +134,12 @@
             <version>${poi.version}</version>
         </dependency>
 
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-scratchpad</artifactId>
+            <version>${poi.version}</version>
+        </dependency>
+
         <!-- ImageIO Support -->
         <dependency>
             <groupId>com.twelvemonkeys.imageio</groupId>
