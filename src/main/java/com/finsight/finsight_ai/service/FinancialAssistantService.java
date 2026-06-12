@@ -87,16 +87,18 @@ public class FinancialAssistantService {
             EXECUTIVE OUTLOOK
             [1-2 sentences: Classification + brief reason]
 
-            CRITICAL REQUIREMENTS:
+            CRITICAL REQUIREMENTS - ABSOLUTELY MANDATORY:
+            ✓ COMPLETE ALL 6 SECTIONS - No truncation, no skipping
             ✓ Always show historical revenue and profit
-            ✓ Always show all historical years available
-            ✓ Always include forecast revenue and profit
+            ✓ Always show all historical years available (minimum 5 years)
+            ✓ Always include FIVE-YEAR FORECAST with both revenue and profit
             ✓ Always show forecast years (2025F-2029F)
-            ✓ Always explain growth drivers
-            ✓ Always provide executive conclusion
-            ✓ Never answer with only historical data
-            ✓ Always include five-year forecast when 3+ data points exist
+            ✓ Always include RISKS section
+            ✓ Always provide EXECUTIVE OUTLOOK conclusion
+            ✓ Always explain growth drivers and market position
+            ✓ Provide comprehensive, detailed analysis for each section
             ✓ Mark forecasts as projections (2025F format)
+            ✓ END RESPONSE WITH PERIOD - Signal completion
             """;
 
     public String analyzeFinancials(String query) {
@@ -188,20 +190,25 @@ public class FinancialAssistantService {
 
     private String buildFinancialContext(List<Document> documents) {
         StringBuilder context = new StringBuilder();
+        context.append("FINANCIAL DATA:\n\n");
 
         if (documents.isEmpty()) {
             return "";
         }
 
-        // Include up to 2 documents, 600 chars max - prioritize token budget for response
-        int docCount = Math.min(2, documents.size());
+        // With Opus 4.8 and 20k tokens, include more documents and content
+        // Opus can handle larger context windows efficiently
+        int docCount = Math.min(5, documents.size());
         for (int i = 0; i < docCount; i++) {
             Document doc = documents.get(i);
             String text = doc.getText();
-            String truncated = text.length() > 600 ? text.substring(0, 600) : text;
+            // Include more content per document - up to 1200 chars
+            String truncated = text.length() > 1200 ? text.substring(0, 1200) + "[...]" : text;
+            context.append("Document ").append(i + 1).append(":\n");
             context.append(truncated).append("\n\n");
         }
 
+        log.info("Financial context prepared: {} characters from {} documents", context.length(), docCount);
         return context.toString();
     }
 
