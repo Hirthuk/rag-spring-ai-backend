@@ -104,13 +104,19 @@ public class FinancialAssistantService {
 
         try {
             List<Document> relevantDocs = vectorStore.similaritySearch(query);
+            log.info("Document search returned {} documents", relevantDocs.size());
 
             if (relevantDocs.isEmpty()) {
                 log.warn("No financial documents found for query: {}", query);
                 return "{\"answer\": \"No financial data available. Please upload financial documents first.\", \"chartType\": \"none\", \"chartData\": []}";
             }
 
+            for (int i = 0; i < relevantDocs.size(); i++) {
+                log.info("Document {}: {} chars", i + 1, relevantDocs.get(i).getText().length());
+            }
+
             String context = buildFinancialContext(relevantDocs);
+            log.info("Context built: {} characters", context.length());
             String userPrompt = buildDetailedPrompt(query, context);
 
             String rawAnalysis = callModelWithSystemPrompt(userPrompt);
