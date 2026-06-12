@@ -24,6 +24,7 @@ src/main/resources/application.properties
 *.ipr
 .target
 *.DS_Store
+.claude
 out/
 ### NetBeans ###
 /nbproject/private/

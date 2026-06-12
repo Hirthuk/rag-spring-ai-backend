@@ -27,6 +27,7 @@ public class ChatService {
     private final MemoryService memoryService;
     private final TavilySearchService tavilySearchService;
     private final SearchRoutingService searchRoutingService;
+    private final Optional<FinancialAssistantService> financialAssistantService;
 
     public ChatService(
             Optional<RetrievalService> retrievalService,
@@ -35,7 +36,8 @@ public class ChatService {
             ResponseParserService responseParserService,
             MemoryService memoryService,
             TavilySearchService tavilySearchService,
-            SearchRoutingService searchRoutingService
+            SearchRoutingService searchRoutingService,
+            Optional<FinancialAssistantService> financialAssistantService
     ) {
         this.retrievalService = retrievalService;
         this.promptBuilderService = promptBuilderService;
@@ -44,6 +46,7 @@ public class ChatService {
         this.memoryService = memoryService;
         this.tavilySearchService = tavilySearchService;
         this.searchRoutingService = searchRoutingService;
+        this.financialAssistantService = financialAssistantService;
     }
 
     // Main method with all parameters
@@ -56,6 +59,12 @@ public class ChatService {
         try {
             log.info("Processing question: {}", userMessage);
             log.info("RetrievalService present = {}", retrievalService.isPresent());
+
+            // Check if this is a financial analysis question - route to FinancialAssistantService
+            if (isFinancialAnalysisQuestion(userMessage) && financialAssistantService.isPresent()) {
+                log.info("🧠 Routing to FinancialAssistantService for detailed financial analysis");
+                return handleFinancialQuestion(userMessage, conversationId);
+            }
 
             // Check memory size before adding
             int currentMessageCount = memoryService.getMessageCount(conversationId);
@@ -173,6 +182,70 @@ public class ChatService {
     }
 
     /**
+     * Check if question is financial analysis related
+     */
+    private boolean isFinancialAnalysisQuestion(String userMessage) {
+        String lowerMessage = userMessage.toLowerCase();
+        return lowerMessage.contains("financial") ||
+               lowerMessage.contains("revenue") ||
+               lowerMessage.contains("profit") ||
+               lowerMessage.contains("forecast") ||
+               lowerMessage.contains("analysis") ||
+               lowerMessage.contains("gross") ||
+               lowerMessage.contains("turnover") ||
+               lowerMessage.contains("margin") ||
+               lowerMessage.contains("growth") ||
+               lowerMessage.contains("ebitda") ||
+               lowerMessage.contains("cash flow") ||
+               lowerMessage.contains("valuation") ||
+               lowerMessage.contains("pe ratio") ||
+               lowerMessage.contains("roe") ||
+               lowerMessage.contains("roa") ||
+               lowerMessage.contains("plan") ||
+               lowerMessage.contains("performance") ||
+               lowerMessage.contains("hcl") ||
+               lowerMessage.contains("tcs") ||
+               lowerMessage.contains("infosys") ||
+               lowerMessage.contains("wipro") ||
+               lowerMessage.contains("reliance") ||
+               lowerMessage.contains("hdfc") ||
+               lowerMessage.contains("future") ||
+               (userMessage.matches(".*(?i)(tell me about|analyze|what about).*(?i)(technologies|company|firm).*"));
+    }
+
+    /**
+     * Handle financial questions with detailed analysis
+     */
+    private ChatResponse handleFinancialQuestion(String userMessage, String conversationId) {
+        try {
+            String jsonResponse = financialAssistantService.get().analyzeFinancials(userMessage);
+
+            // Parse the JSON response
+            ChatResponse response = responseParserService.parseAIResponse(jsonResponse);
+
+            // Save to memory
+            memoryService.addMessage(conversationId, "USER", userMessage);
+            if (response.getAnswer() != null) {
+                memoryService.addMessage(conversationId, "ASSISTANT", response.getAnswer());
+            }
+
+            // Validate and clean chart data
+            response = validateAndCleanChartData(response);
+
+            log.info("✅ Financial analysis completed - response length: {} characters, chart data points: {}",
+                    response.getAnswer() != null ? response.getAnswer().length() : 0,
+                    response.getChartData() != null ? response.getChartData().size() : 0);
+
+            return response;
+        } catch (Exception e) {
+            log.error("Error in financial analysis: {}", e.getMessage());
+            ChatResponse fallback = new ChatResponse();
+            fallback.setAnswer("Financial analysis failed: " + e.getMessage());
+            return fallback;
+        }
+    }
+
+    /**
      * Validate and clean chart data - works with List<Map<String, Object>>
      */
     private ChatResponse validateAndCleanChartData(ChatResponse response) {
@@ -236,78 +309,117 @@ public class ChatService {
     }
 
     /**
-     * Simplified system prompt focused on forecasting
+     * Enhanced system prompt - AGGRESSIVE format enforcement
      */
     private String getSimplifiedSystemPrompt() {
         return """
-You are FinSight AI. Return ONLY valid JSON. No text before, no text after, no markdown, no ```json.
+⚠️ CRITICAL INSTRUCTIONS - READ FIRST ⚠️
 
-==================================================
-OUTPUT STRUCTURE (STRICT)
-==================================================
+RESPONSE FORMAT: You MUST respond with VALID JSON ONLY. NO exceptions. NO text outside JSON.
 
+MANDATORY JSON STRUCTURE (STRICT - NO VARIATIONS):
 {
-  "answer": "string - concise, 2-3 sentences max",
-  "chartType": "line" OR "bar" OR "forecast" OR "none",
-  "chartData": []
+  "answer": "Your detailed comprehensive analysis here (1000+ words)...",
+  "chartType": "line",
+  "chartData": [{"year": "2020", "value": 10000000}, {"year": "2021", "value": 12000000}, ...]
 }
 
-==================================================
-FORECASTING RULE (DEFAULT FOR COMPANY QUESTIONS)
-==================================================
+JSON RULES (ABSOLUTE):
+✓ Start with { and end with }
+✓ All fields required: answer, chartType, chartData
+✓ NO text before { or after }
+✓ NO markdown, NO backticks, NO ```json
+✓ NO ESCAPE ISSUES - use proper JSON escaping
+✓ chartData: array with minimum 5 entries (max 10)
+✓ All values must be integers (10000000 not "10000000")
+✓ All years must be strings ("2020" not 2020)
 
-When user asks about a company (e.g., "how is X doing?", "X performance", "X financial health", "tell me about X"):
+ANSWER FIELD REQUIREMENTS:
+- MINIMUM 1000+ words of comprehensive analysis
+- NEVER truncate - complete every sentence
+- Include ALL historical years with numbers
+- Include forecasts with "F" suffix years (2025F, 2026F)
+- Use actual numbers from your analysis
+- Structure: Overview → Historical Data → Trend Analysis → Forecast → Conclusion
+- Financial metrics: Revenue, Growth %, CAGR, Margins, etc.
+- ALWAYS end with complete conclusion ending with period
+- NEVER end mid-sentence or with "..."
 
-→ ALWAYS provide a 5-year forecast by DEFAULT
+CHARTDATA REQUIREMENTS:
+- Minimum 5 data points, maximum 10
+- Extract EXACT numbers from answer field
+- Format: {"year": "2020", "value": 10000000}
+- Historical years: "2020", "2021", "2022", "2023", "2024"
+- Forecast years: "2025F", "2026F" (with F suffix)
+- Values: Always integers, no decimals or strings
+- Include both historical and forecast data
 
-Forecasting requires:
-✓ At least 3 years of historical data
+FOR COMPANY/FINANCIAL ANALYSIS QUESTIONS:
 
-If 3+ years exist:
-- Project revenue for next 5 years
-- Use chartType = "forecast"
-- Add "F" suffix to forecast years: "2025F", "2026F", etc.
-- Calculate using CAGR = (Last Year Value / First Year Value) ^ (1/Number of Years) - 1
+Include these sections in order:
+1. COMPANY OVERVIEW (100+ words)
+   - Business description
+   - Market position
+   - Key business segments
 
-If less than 3 years exist:
-- Skip forecast
-- Use chartType = "line"
-- State limitation in answer
+2. HISTORICAL FINANCIAL DATA (400+ words)
+   - FY2020-2024 Revenue figures
+   - Year-over-year growth percentages
+   - Identify trends and patterns
+   - Calculate CAGR
 
-==================================================
-ANSWER RULES
-==================================================
+3. CURRENT POSITION (300+ words)
+   - Latest financial metrics
+   - Margins (Gross, Operating, Net)
+   - Key ratios and indicators
+   - Financial health assessment
 
-Keep answers SHORT (50-75 words max).
-No bullet points.
-No markdown formatting.
-Natural sentences only.
+4. TREND ANALYSIS (300+ words)
+   - Growth trajectory
+   - Comparative analysis
+   - Industry position
+   - Market dynamics
 
-==================================================
-CHART DATA FORMAT
-==================================================
+5. FUTURE PLANS & FORECAST (400+ words)
+   - Strategic initiatives
+   - Expansion plans
+   - 5-year projections (2025-2026)
+   - Based on historical CAGR
+   - Risk factors and opportunities
 
-[{"year": "2020", "value": 10000000}, {"year": "2021", "value": 12000000}]
+6. INVESTMENT PERSPECTIVE (200+ words)
+   - Overall outlook
+   - Key strengths and weaknesses
+   - Growth potential
+   - Recommendations
 
-Values must be integers (no quotes, no commas, no decimals)
+CRITICAL VALIDATION (CHECK BEFORE RESPONDING):
+✓ Response is valid, parseable JSON
+✓ Answer field contains 1000+ words
+✓ Answer ends with period, NOT truncated
+✓ All mentioned years appear in both answer and chartData
+✓ chartData has 5-10 entries with proper formatting
+✓ No escape character issues
+✓ Forecast years have "F" suffix in chartData
+✓ All numbers are integers
+✓ Every number in chartData matches answer text
 
-For forecast charts:
-- Historical years: no suffix
-- Forecast years: add "F" suffix like "2025F"
+IF ANALYZING COMPANIES (HCL, TCS, INFOSYS, RELIANCE, HDFC, WIPRO):
+- You HAVE access to uploaded documents
+- Extract actual financial figures from documents
+- Provide specific numbers, not generic statements
+- Include historical trends and future guidance
+- Give clear financial perspective
 
-==================================================
-HALLUCINATION PREVENTION
-==================================================
+COMPLETE YOUR RESPONSE:
+✓ Do NOT truncate or cut off
+✓ Do NOT end mid-analysis
+✓ Do NOT use placeholder text
+✓ Finish what you start
+✓ Provide comprehensive detail
+✓ End with valid JSON closing }
 
-Use ONLY retrieved financial data for historical values.
-Never invent numbers.
-
-If insufficient data:
-{
-  "answer": "Insufficient data available for reliable analysis.",
-  "chartType": "none",
-  "chartData": []
-}
+Now respond with COMPLETE, COMPREHENSIVE analysis in valid JSON format:
 """;
     }
 }
