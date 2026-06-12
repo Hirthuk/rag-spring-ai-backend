@@ -182,35 +182,53 @@ public class ChatService {
     }
 
     /**
-     * Check if question is financial analysis related
+     * Check if question is financial analysis related (NOT just any question about companies)
+     * Must have clear financial analysis intent
      */
     private boolean isFinancialAnalysisQuestion(String userMessage) {
-        String lowerMessage = userMessage.toLowerCase();
-        return lowerMessage.contains("financial") ||
+        // Reject greetings and casual messages
+        String lowerMessage = userMessage.toLowerCase().trim();
+
+        if (lowerMessage.matches("^(hi|hello|hey|greetings|my name is.*|who are you|what is your name|thanks|thank you).*")) {
+            return false;
+        }
+
+        // Must have explicit financial analysis keywords + company context
+        boolean hasFinancialKeyword =
+               lowerMessage.contains("financial") ||
                lowerMessage.contains("revenue") ||
                lowerMessage.contains("profit") ||
                lowerMessage.contains("forecast") ||
-               lowerMessage.contains("analysis") ||
-               lowerMessage.contains("gross") ||
-               lowerMessage.contains("turnover") ||
-               lowerMessage.contains("margin") ||
-               lowerMessage.contains("growth") ||
                lowerMessage.contains("ebitda") ||
                lowerMessage.contains("cash flow") ||
                lowerMessage.contains("valuation") ||
                lowerMessage.contains("pe ratio") ||
                lowerMessage.contains("roe") ||
                lowerMessage.contains("roa") ||
-               lowerMessage.contains("plan") ||
-               lowerMessage.contains("performance") ||
+               lowerMessage.contains("margin") ||
+               lowerMessage.contains("turnover") ||
+               lowerMessage.contains("earnings") ||
+               lowerMessage.contains("growth analysis") ||
+               lowerMessage.contains("investment outlook");
+
+        boolean hasCompanyName =
                lowerMessage.contains("hcl") ||
                lowerMessage.contains("tcs") ||
                lowerMessage.contains("infosys") ||
                lowerMessage.contains("wipro") ||
                lowerMessage.contains("reliance") ||
                lowerMessage.contains("hdfc") ||
-               lowerMessage.contains("future") ||
-               (userMessage.matches(".*(?i)(tell me about|analyze|what about).*(?i)(technologies|company|firm).*"));
+               lowerMessage.contains("bajaj") ||
+               lowerMessage.contains("icici") ||
+               lowerMessage.contains("axis");
+
+        // Route to FinancialAssistant only if financial keyword + company,
+        // OR explicit financial analysis request
+        return (hasFinancialKeyword && (hasCompanyName || lowerMessage.contains("analysis"))) ||
+               lowerMessage.contains("financial analysis") ||
+               lowerMessage.contains("financial health") ||
+               lowerMessage.contains("5 year forecast") ||
+               lowerMessage.contains("5-year forecast");
     }
 
     /**
@@ -309,20 +327,27 @@ public class ChatService {
     }
 
     /**
-     * Enhanced system prompt - AGGRESSIVE format enforcement
+     * System prompt for regular chat and financial analysis
      */
     private String getSimplifiedSystemPrompt() {
         return """
-⚠️ CRITICAL INSTRUCTIONS - READ FIRST ⚠️
+RESPONSE FORMAT: You MUST respond with VALID JSON ONLY.
 
-RESPONSE FORMAT: You MUST respond with VALID JSON ONLY. NO exceptions. NO text outside JSON.
-
-MANDATORY JSON STRUCTURE (STRICT - NO VARIATIONS):
+MANDATORY JSON STRUCTURE:
 {
-  "answer": "Your detailed comprehensive analysis here (1000+ words)...",
-  "chartType": "line",
-  "chartData": [{"year": "2020", "value": 10000000}, {"year": "2021", "value": 12000000}, ...]
+  "answer": "Your response here",
+  "chartType": "none",
+  "chartData": []
 }
+
+CRITICAL RULES:
+✓ Start with { and end with }
+✓ All fields required: answer, chartType, chartData
+✓ NO text before { or after }
+✓ answer field: Provide complete response without truncation
+✓ For casual conversation: conversational response
+✓ For financial queries: structured financial analysis
+✓ Always end sentences with periods, not ellipsis
 
 JSON RULES (ABSOLUTE):
 ✓ Start with { and end with }
