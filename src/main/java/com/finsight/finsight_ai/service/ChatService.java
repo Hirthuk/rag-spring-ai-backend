@@ -136,8 +136,11 @@ public class ChatService {
             log.info(userPrompt);
             log.info("================================");
 
-            // Build system prompt (using simplified version)
-            String finalSystemPrompt = buildFinalSystemPrompt(systemMessage);
+            // Build system prompt - use a simple conversational prompt for casual
+            // messages so the model doesn't launch into financial analysis for "Hi"
+            String finalSystemPrompt = isCasual
+                    ? getCasualSystemPrompt()
+                    : buildFinalSystemPrompt(systemMessage);
 
             // Save user message BEFORE getting AI response
             memoryService.addMessage(conversationId, "USER", userMessage);
@@ -340,6 +343,33 @@ public class ChatService {
         }
 
         return response;
+    }
+
+    /**
+     * Minimal conversational system prompt for casual/greeting messages.
+     * Keeps the JSON envelope (so parsing stays consistent) but does NOT push
+     * financial analysis, company examples, or chart data.
+     */
+    private String getCasualSystemPrompt() {
+        return """
+You are FinSight AI, a friendly financial intelligence assistant.
+
+The user has sent a casual or conversational message (a greeting, an introduction,
+a thank-you, or small talk). Respond naturally and warmly in 1-3 sentences.
+
+Do NOT produce any company financial analysis, numbers, historical data, forecasts,
+or chart data unless the user explicitly asks for it. If they introduced themselves,
+acknowledge it. You may briefly mention you can help with financial analysis when asked.
+
+RESPONSE FORMAT - respond with VALID JSON ONLY:
+{
+  "answer": "your short, friendly conversational reply",
+  "chartType": "none",
+  "chartData": []
+}
+
+Rules: start with { and end with }, no text outside the JSON, keep chartData empty.
+""";
     }
 
     /**
