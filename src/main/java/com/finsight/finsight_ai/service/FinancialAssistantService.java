@@ -339,7 +339,8 @@ public class FinancialAssistantService {
             String context = analysis.substring(start, end);
 
             java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                "[₹$€£]\\s*([\\d,]+(?:\\.\\d+)?)\\s*(crores?|billions?|millions?|trillions?|B|M|bn|mn|cr|T)\\b"
+                "(?:Rs\\.?|INR|[₹$€£])\\s*([\\d,]+(?:\\.\\d+)?)\\s*(crores?|billions?|millions?|trillions?|B|M|bn|mn|cr|T)\\b",
+                java.util.regex.Pattern.CASE_INSENSITIVE
             );
             java.util.regex.Matcher matcher = pattern.matcher(context);
 
