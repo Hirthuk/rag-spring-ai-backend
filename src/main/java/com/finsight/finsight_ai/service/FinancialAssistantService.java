@@ -58,7 +58,7 @@ public class FinancialAssistantService {
 
             Overall Outlook Classification: Very Positive / Positive / Neutral / Negative
 
-            FIVE-YEAR FORECAST REQUIREMENTS (mandatory when data available):
+            FIVE-YEAR FORECAST REQUIREMENTS (mandatory when 3+ years of data exist):
             - Analyze historical CAGR
             - Analyze revenue growth trends
             - Analyze profit growth trends
@@ -67,8 +67,15 @@ public class FinancialAssistantService {
             - Generate projected profit for 2025F-2029F
             - Forecasts must be realistic and evidence-based
             - Clearly label as projected values
+            - IMPORTANT: If at least 3 years of REVENUE history exist, you MUST still
+              produce a full revenue forecast using the historical revenue CAGR - do
+              NOT skip the forecast just because profit data is missing.
+            - If profit figures are unavailable, ESTIMATE projected profit by applying a
+              reasonable industry net margin (state the assumed margin %, e.g. "assuming
+              ~14% net margin"). Never output placeholders like "Data gap" or "N/A" when
+              revenue history is available - always compute concrete projected numbers.
 
-            RESPONSE FORMAT (STRICT - keep concise):
+            RESPONSE FORMAT (STRICT - follow exactly):
 
             CURRENT COMPANY HEALTH
             Revenue: [Latest figure with year]
@@ -84,31 +91,43 @@ public class FinancialAssistantService {
             * [Brief insight 2]
             * [Brief insight 3]
 
-            FIVE-YEAR FORECAST
-            2025F Revenue: [Amount] | Profit: [Amount]
-            2026F Revenue: [Amount] | Profit: [Amount]
-            2027F Revenue: [Amount] | Profit: [Amount]
-            2028F Revenue: [Amount] | Profit: [Amount]
-            2029F Revenue: [Amount] | Profit: [Amount]
+            ==================================================
+            >>> FIVE-YEAR FORECAST (PROJECTED) -- KEY HIGHLIGHT
+            ==================================================
+            Projected Growth Rate (CAGR): [X% per year]
+            Forecast Basis: [e.g. derived from N-year historical CAGR and margin trend]
+
+            2025F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
+            2026F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
+            2027F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
+            2028F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
+            2029F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
+
+            FORECAST ANALYSIS:
+            [2-3 sentences highlighting the projected PROFIT trajectory, expected GROWTH
+            momentum, and the key drivers/assumptions behind the projection. State clearly
+            whether profit and growth are expected to accelerate, stay steady, or slow down.]
+            ==================================================
 
             RISKS
             * [Brief risk 1]
             * [Brief risk 2]
 
             EXECUTIVE OUTLOOK
-            [1-2 sentences: Classification + brief reason]
+            [1-2 sentences: Classification + brief reason, referencing the forecast]
 
             CRITICAL REQUIREMENTS - ABSOLUTELY MANDATORY:
-            ✓ COMPLETE ALL 6 SECTIONS - No truncation, no skipping
+            ✓ COMPLETE ALL SECTIONS - No truncation, no skipping
             ✓ Always show historical revenue and profit
             ✓ Always show all historical years available (minimum 5 years)
-            ✓ Always include FIVE-YEAR FORECAST with both revenue and profit
-            ✓ Always show forecast years (2025F-2029F)
+            ✓ The FIVE-YEAR FORECAST is the most important add-on section - make it
+              prominent with the ==== highlight banners exactly as shown above
+            ✓ Forecast MUST include projected revenue, projected profit AND YoY growth %
+              for every year 2025F-2029F
+            ✓ Forecast MUST include the FORECAST ANALYSIS commentary on future profit & growth
             ✓ Always include RISKS section
             ✓ Always provide EXECUTIVE OUTLOOK conclusion
-            ✓ Always explain growth drivers and market position
-            ✓ Provide comprehensive, detailed analysis for each section
-            ✓ Mark forecasts as projections (2025F format)
+            ✓ Mark forecasts as projections (2025F format with the F suffix)
             ✓ END RESPONSE WITH PERIOD - Signal completion
             """;
 
@@ -242,16 +261,7 @@ public class FinancialAssistantService {
 
             String analysisText = cleanAnalysisText(rawAnalysis);
 
-            Map<String, Object> chartData = extractChartDataFromText(analysisText);
-            List<Map<String, Object>> chartDataList = new ArrayList<>();
-            if (!chartData.isEmpty()) {
-                chartData.forEach((k, v) -> {
-                    Map<String, Object> item = new HashMap<>();
-                    item.put("year", k);
-                    item.put("value", v);
-                    chartDataList.add(item);
-                });
-            }
+            List<Map<String, Object>> chartDataList = extractChartDataFromText(analysisText);
 
             Map<String, Object> response = new HashMap<>();
             response.put("answer", analysisText);
@@ -299,50 +309,72 @@ public class FinancialAssistantService {
         return text;
     }
 
-    private Map<String, Object> extractChartDataFromText(String analysis) {
-        Map<String, Object> data = new HashMap<>();
+    /**
+     * Extracts an ordered list of chart points (revenue) from the analysis text.
+     * Each point is tagged as "historical" or "forecast" so the frontend can
+     * highlight the projected (add-on) portion of the trend distinctly.
+     * Forecast years are detected by the "F" suffix (e.g. "2025F") and labelled
+     * with that suffix.
+     */
+    private List<Map<String, Object>> extractChartDataFromText(String analysis) {
+        List<Map<String, Object>> data = new ArrayList<>();
 
-        String[] years = {"2020", "2021", "2022", "2023", "2024", "2025", "2026", "2027", "2028", "2029", "2030"};
+        String[] years = {"2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024",
+                "2025", "2026", "2027", "2028", "2029", "2030"};
 
         for (String year : years) {
-            if (analysis.contains(year)) {
-                int index = analysis.indexOf(year);
-                int start = Math.max(0, index - 200);
-                int end = Math.min(analysis.length(), index + 200);
-                String context = analysis.substring(start, end);
+            // A year is a FORECAST if it appears with the F suffix (e.g. "2025F")
+            boolean isForecast = analysis.contains(year + "F");
+            String searchToken = isForecast ? year + "F" : year;
 
-                java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                    "[₹$€£]\\s*([\\d,]+(?:\\.\\d+)?)\\s*(crore|billion|million|trillion|B|M|bn|mn|cr|T)\\b"
-                );
-                java.util.regex.Matcher matcher = pattern.matcher(context);
+            int index = analysis.indexOf(searchToken);
+            if (index < 0) {
+                continue;
+            }
 
-                if (matcher.find()) {
-                    String valueStr = matcher.group(1).replace(",", "").trim();
-                    String magnitude = matcher.group(2).toLowerCase();
+            // Look at the text right after the year token so we capture that
+            // year's revenue figure (the first currency amount following it).
+            int start = index;
+            int end = Math.min(analysis.length(), index + 120);
+            String context = analysis.substring(start, end);
 
-                    try {
-                        double value = Double.parseDouble(valueStr);
+            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "[₹$€£]\\s*([\\d,]+(?:\\.\\d+)?)\\s*(crores?|billions?|millions?|trillions?|B|M|bn|mn|cr|T)\\b"
+            );
+            java.util.regex.Matcher matcher = pattern.matcher(context);
 
-                        if (magnitude.startsWith("cr")) {
-                            value *= 10_000_000;
-                        } else if (magnitude.startsWith("b")) {
-                            value *= 1_000_000_000;
-                        } else if (magnitude.startsWith("m") && magnitude.length() <= 3) {
-                            value *= 1_000_000;
-                        } else if (magnitude.startsWith("t")) {
-                            value *= 1_000_000_000_000L;
-                        }
+            if (matcher.find()) {
+                String valueStr = matcher.group(1).replace(",", "").trim();
+                String magnitude = matcher.group(2).toLowerCase();
 
-                        data.put(year, (long) value);
-                        log.debug("Extracted value for year {}: {}", year, (long) value);
-                    } catch (NumberFormatException e) {
-                        log.debug("Could not parse value for year {}", year);
+                try {
+                    double value = Double.parseDouble(valueStr);
+
+                    if (magnitude.startsWith("cr")) {
+                        value *= 10_000_000;
+                    } else if (magnitude.startsWith("b")) {
+                        value *= 1_000_000_000;
+                    } else if (magnitude.startsWith("m") && magnitude.length() <= 3) {
+                        value *= 1_000_000;
+                    } else if (magnitude.startsWith("t")) {
+                        value *= 1_000_000_000_000L;
                     }
+
+                    Map<String, Object> item = new HashMap<>();
+                    item.put("year", isForecast ? year + "F" : year);
+                    item.put("value", (long) value);
+                    item.put("type", isForecast ? "forecast" : "historical");
+                    data.add(item);
+                    log.debug("Extracted {} value for {}: {}", isForecast ? "forecast" : "historical", year, (long) value);
+                } catch (NumberFormatException e) {
+                    log.debug("Could not parse value for year {}", year);
                 }
             }
         }
 
-        log.info("Extracted {} chart data points from analysis", data.size());
+        long forecastCount = data.stream().filter(d -> "forecast".equals(d.get("type"))).count();
+        log.info("Extracted {} chart data points ({} historical, {} forecast)",
+                data.size(), data.size() - forecastCount, forecastCount);
         return data;
     }
 

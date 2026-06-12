@@ -122,8 +122,16 @@ public class ResponseParserService {
                     Map<String, Object> dataMap = new HashMap<>();
                     dataMap.put("year", year);
                     dataMap.put("value", numericValue);
+                    // Preserve the forecast/historical marker so the frontend can
+                    // highlight projected (add-on) points distinctly. Fall back to
+                    // detecting the "F" suffix on the year label.
+                    if (dataPoint.has("type") && !dataPoint.get("type").isNull()) {
+                        dataMap.put("type", dataPoint.get("type").asText());
+                    } else {
+                        dataMap.put("type", year.endsWith("F") ? "forecast" : "historical");
+                    }
                     chartDataList.add(dataMap);
-                    log.debug("Added chart data: year={}, value={}", year, numericValue);
+                    log.debug("Added chart data: year={}, value={}, type={}", year, numericValue, dataMap.get("type"));
                 } else {
                     log.warn("No numeric value found for year: {}", year);
                 }
@@ -313,8 +321,8 @@ public class ResponseParserService {
         }
         List<Map<String, Object>> formatted = new ArrayList<>();
         for (Map<String, Object> dataPoint : response.getChartData()) {
-            Map<String, Object> out = new HashMap<>();
-            out.put("year", dataPoint.get("year"));
+            // Copy all fields (year, type, and any others) then normalize value
+            Map<String, Object> out = new HashMap<>(dataPoint);
             Object value = dataPoint.get("value");
             if (value instanceof Number n) {
                 out.put("value", (double) (long) n.doubleValue());
