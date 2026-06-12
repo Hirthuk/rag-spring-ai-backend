@@ -81,8 +81,12 @@ public class ChatService {
             log.info("Memory context built from {} history messages", history.size());
 
             // Try to retrieve relevant documents if retrieval service is available
+            // SKIP RAG for casual/greeting messages to avoid injecting irrelevant financial data
             List<Document> documents = new ArrayList<>();
-            if (retrievalService.isPresent()) {
+            boolean isCasual = isCasualMessage(userMessage);
+            if (isCasual) {
+                log.info("💬 Casual/greeting message detected - skipping RAG retrieval");
+            } else if (retrievalService.isPresent()) {
                 try {
                     RetrievalService service = retrievalService.get();
                     String retrievalQuery = service.prepareRetrievalQuery(userMessage);
@@ -114,7 +118,7 @@ public class ChatService {
 
             // Build user prompt
             String internetContext = "";
-            if (searchRoutingService.shouldUseInternetSearch(userMessage)) {
+            if (!isCasual && searchRoutingService.shouldUseInternetSearch(userMessage)) {
                 internetContext = tavilySearchService.search(userMessage);
                 log.info("Internet Search Used");
                 log.info("Internet Context: {}", internetContext);
@@ -229,6 +233,35 @@ public class ChatService {
                lowerMessage.contains("financial health") ||
                lowerMessage.contains("5 year forecast") ||
                lowerMessage.contains("5-year forecast");
+    }
+
+    /**
+     * Detect casual/greeting messages that should NOT trigger RAG document retrieval
+     * or internet search. Prevents irrelevant financial data being injected into
+     * simple conversational messages like "Hi".
+     */
+    private boolean isCasualMessage(String userMessage) {
+        if (userMessage == null) {
+            return false;
+        }
+        String lower = userMessage.toLowerCase().trim();
+
+        // Short greetings and introductions
+        if (lower.matches("^(hi|hello|hey|hii+|yo|greetings|good morning|good afternoon|good evening)[!. ]*$")) {
+            return true;
+        }
+        if (lower.matches("^(my name is|i am|i'm|this is|call me)\\s+.*")) {
+            return true;
+        }
+        if (lower.matches("^(who are you|what is your name|what can you do|how are you|what are you)[?. ]*$")) {
+            return true;
+        }
+        if (lower.matches("^(thanks|thank you|thx|ok|okay|cool|nice|great|bye|goodbye)[!. ]*$")) {
+            return true;
+        }
+
+        // Very short messages with no financial intent are treated as casual
+        return lower.length() <= 15 && !isFinancialAnalysisQuestion(userMessage);
     }
 
     /**

@@ -5,6 +5,7 @@ import org.springframework.ai.bedrock.converse.BedrockProxyChatModel;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -17,13 +18,13 @@ public class AIResponseService {
 
     private final BedrockProxyChatModel chatModel;
 
-    @Value("${spring.ai.bedrock.converse.options.max-tokens:4096}")
+    @Value("${spring.ai.bedrock.converse.chat.options.max-tokens:10000}")
     private Integer maxTokens;
 
-    @Value("${spring.ai.bedrock.converse.options.temperature:0.1}")
+    @Value("${spring.ai.bedrock.converse.chat.options.temperature:0.15}")
     private Double temperature;
 
-    @Value("${spring.ai.bedrock.converse.options.top-p:0.85}")
+    @Value("${spring.ai.bedrock.converse.chat.options.top-p:0.85}")
     private Double topP;
 
     public AIResponseService(BedrockProxyChatModel chatModel) {
@@ -39,11 +40,19 @@ public class AIResponseService {
                 log.info("AI Request attempt {}/{}", attempt, maxRetries);
                 log.info("Using configuration - Max Tokens: {}, Temperature: {}, Top-P: {}", maxTokens, temperature, topP);
 
+                // Explicitly pass options so max-tokens is GUARANTEED to be applied
+                ChatOptions options = ChatOptions.builder()
+                        .maxTokens(maxTokens)
+                        .temperature(temperature)
+                        .topP(topP)
+                        .build();
+
                 var request = new Prompt(
                         List.of(
                                 new SystemMessage(systemPrompt),
                                 new UserMessage(userPrompt)
-                        )
+                        ),
+                        options
                 );
 
                 var response = chatModel.call(request);

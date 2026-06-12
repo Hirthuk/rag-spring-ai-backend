@@ -6,9 +6,11 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -20,6 +22,15 @@ public class FinancialAssistantService {
 
     private final ChatModel chatModel;
     private final VectorStore vectorStore;
+
+    @Value("${spring.ai.bedrock.converse.chat.options.max-tokens:10000}")
+    private Integer maxTokens;
+
+    @Value("${spring.ai.bedrock.converse.chat.options.temperature:0.15}")
+    private Double temperature;
+
+    @Value("${spring.ai.bedrock.converse.chat.options.top-p:0.85}")
+    private Double topP;
 
     private static final String FINANCIAL_SYSTEM_PROMPT = """
             YOU ARE FINSIGHT AI - ENTERPRISE FINANCIAL INTELLIGENCE AND FORECASTING ASSISTANT.
@@ -142,17 +153,30 @@ public class FinancialAssistantService {
             String userContent = "USER REQUEST:\n" + userPrompt;
             UserMessage userMsg = new UserMessage(userContent);
 
-            // Create prompt with proper message structure
-            Prompt prompt = new Prompt(java.util.Arrays.asList(systemMessage, userMsg));
+            // Explicitly pass options so max-tokens is GUARANTEED to be applied
+            ChatOptions options = ChatOptions.builder()
+                    .maxTokens(maxTokens)
+                    .temperature(temperature)
+                    .topP(topP)
+                    .build();
 
-            // Call model with proper prompt structure (will use configured options from application.properties)
+            log.info("FinancialAssistant calling model with Max Tokens: {}, Temperature: {}", maxTokens, temperature);
+
+            // Create prompt with message structure AND explicit options
+            Prompt prompt = new Prompt(java.util.Arrays.asList(systemMessage, userMsg), options);
+
             ChatResponse chatResponse = chatModel.call(prompt);
             String response = chatResponse.getResult().getOutput().getText();
 
+            // Log token usage to verify full utilization
+            var usage = chatResponse.getMetadata().getUsage();
+            log.info("FinancialAssistant Token Usage - Prompt: {}, Completion: {}/{}, Total: {}",
+                    usage.getPromptTokens(),
+                    usage.getCompletionTokens(),
+                    maxTokens,
+                    usage.getTotalTokens());
+
             log.info("Model response received, length: {} characters", response.length());
-            if (response.length() < 2000) {
-                log.warn("WARNING: Response is very short ({} chars). Expected 3000+. Full response: {}", response.length(), response);
-            }
             return response;
         } catch (Exception e) {
             log.error("Error calling model: {}", e.getMessage());
