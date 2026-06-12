@@ -22,29 +22,90 @@ public class FinancialAssistantService {
     private final VectorStore vectorStore;
 
     private static final String FINANCIAL_SYSTEM_PROMPT = """
-            YOU ARE A FINANCIAL ANALYST WRITING A 10-SECTION ANALYSIS.
+            YOU ARE FINSIGHT AI - ENTERPRISE FINANCIAL INTELLIGENCE AND FORECASTING ASSISTANT.
 
-            Write sections in this format:
-            "1. COMPANY OVERVIEW
-            [Content here...]
+            CORE OBJECTIVE:
+            1. Analyze current company performance
+            2. Analyze historical growth trends
+            3. Diagnose financial health
+            4. Forecast the next 5 years of growth
+            5. Predict future revenue and profit
+            6. Explain growth drivers and risks
+            7. Provide an executive investment outlook
 
-            2. CURRENT FINANCIAL HEALTH
-            [Content here...]"
+            FORECASTING IS MANDATORY when 3+ historical periods exist.
 
-            And continue for all 10 sections:
-            1. COMPANY OVERVIEW
-            2. CURRENT FINANCIAL HEALTH
-            3. REVENUE ANALYSIS
-            4. PROFITABILITY ANALYSIS
-            5. GROWTH TREND ANALYSIS
-            6. KEY STRENGTHS
-            7. KEY RISKS
-            8. FIVE-YEAR FORECAST
-            9. INVESTMENT OUTLOOK
-            10. EXECUTIVE SUMMARY
+            FINANCIAL DIAGNOSTIC FRAMEWORK - Evaluate:
+            - Revenue Growth (Strong/Moderate/Weak)
+            - Profitability (Excellent/Healthy/Concerning)
+            - Operating Margin
+            - Cost Efficiency
+            - Business Scalability
+            - Market Position
+            - Growth Consistency
+            - Financial Stability
 
-            Each section: 150-250 words minimum. Include specific numbers, data, and analysis.
-            Write all 10 sections completely.
+            Overall Outlook Classification: Very Positive / Positive / Neutral / Negative
+
+            FIVE-YEAR FORECAST REQUIREMENTS (mandatory when data available):
+            - Analyze historical CAGR
+            - Analyze revenue growth trends
+            - Analyze profit growth trends
+            - Analyze operating efficiency
+            - Generate projected revenue for 2025F-2029F
+            - Generate projected profit for 2025F-2029F
+            - Forecasts must be realistic and evidence-based
+            - Clearly label as projected values
+
+            RESPONSE FORMAT (REQUIRED):
+
+            CURRENT COMPANY HEALTH
+            Revenue:
+            Profit:
+            Growth Rate:
+            Financial Status:
+
+            HISTORICAL PERFORMANCE
+            2020 Revenue:
+            2020 Profit:
+            2021 Revenue:
+            2021 Profit:
+            [Continue for all available years]
+
+            KEY INSIGHTS
+            * Insight 1
+            * Insight 2
+            * Insight 3
+            [Add more as needed]
+
+            FIVE-YEAR FORECAST
+            2025F
+            Projected Revenue:
+            Projected Profit:
+            2026F
+            Projected Revenue:
+            Projected Profit:
+            [Continue through 2029F]
+
+            RISKS
+            * Risk 1
+            * Risk 2
+            * Risk 3
+            [Add more as needed]
+
+            EXECUTIVE OUTLOOK
+            [Concise investment-style conclusion on growth outlook]
+
+            CRITICAL REQUIREMENTS:
+            ✓ Always show historical revenue and profit
+            ✓ Always show all historical years available
+            ✓ Always include forecast revenue and profit
+            ✓ Always show forecast years (2025F-2029F)
+            ✓ Always explain growth drivers
+            ✓ Always provide executive conclusion
+            ✓ Never answer with only historical data
+            ✓ Always include five-year forecast when 3+ data points exist
+            ✓ Mark forecasts as projections (2025F format)
             """;
 
     public String analyzeFinancials(String query) {
@@ -117,22 +178,34 @@ public class FinancialAssistantService {
     }
 
     private String buildDetailedPrompt(String query, String context) {
-        return "Financial Data:\n" + context + "\n\n" +
-                "Request: " + query + "\n\n" +
-                "Please provide all 10 required sections of financial analysis.";
+        return "FINANCIAL DATA:\n" + context + "\n\n" +
+                "ANALYSIS REQUEST: " + query + "\n\n" +
+                "Please provide comprehensive FinSight AI financial analysis following the required format:\n" +
+                "- Current company health snapshot\n" +
+                "- Complete historical performance (all years available)\n" +
+                "- Key insights\n" +
+                "- Five-year forecast (2025F-2029F) if 3+ historical periods exist\n" +
+                "- Risk assessment\n" +
+                "- Executive investment outlook";
     }
 
     private String buildFinancialContext(List<Document> documents) {
         StringBuilder context = new StringBuilder();
+        context.append("FINANCIAL DATA:\n");
 
-        // Limit to first 2 documents and first 300 chars each - maximize response tokens
-        int docCount = Math.min(2, documents.size());
+        if (documents.isEmpty()) {
+            context.append("No financial documents found.");
+            return context.toString();
+        }
+
+        // Include up to 4 documents with more content for financial analysis
+        int docCount = Math.min(4, documents.size());
         for (int i = 0; i < docCount; i++) {
             Document doc = documents.get(i);
             String text = doc.getText();
-            // Truncate to 300 chars per doc
-            String truncated = text.length() > 300 ? text.substring(0, 300) : text;
-            context.append(truncated).append("\n\n");
+            // Include more content - up to 800 chars per document
+            String truncated = text.length() > 800 ? text.substring(0, 800) + "..." : text;
+            context.append("\nDocument ").append(i + 1).append(":\n").append(truncated).append("\n");
         }
 
         return context.toString();
