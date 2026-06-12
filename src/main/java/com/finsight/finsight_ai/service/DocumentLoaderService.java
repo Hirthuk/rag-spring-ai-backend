@@ -70,8 +70,22 @@ public class DocumentLoaderService {
         log.info("=================================");
 
         try {
-            // Load existing document hashes from Chroma to prevent duplicates
+            // Load existing document hashes from the tracking file to prevent duplicates
             loadExistingDocumentHashes();
+
+            // SAFEGUARD: the hash tracking file can fall out of sync with Chroma
+            // (e.g. the collection was cleared/recreated while the tracking file
+            // persisted). If we have tracked hashes but the vector store is actually
+            // empty, the tracking file is stale - reset it so everything re-ingests.
+            // Without this, ingestion is skipped and queries return "No financial
+            // data available".
+            if (!processedFileHashes.isEmpty() && isVectorStoreEmpty()) {
+                log.warn("Tracking file lists {} documents but the vector store is EMPTY - " +
+                        "treating tracking file as stale and forcing a full re-ingest.",
+                        processedFileHashes.size());
+                processedFileHashes.clear();
+                resetHashTrackingFile();
+            }
 
             List<Resource> allResources = new ArrayList<>();
 
@@ -168,6 +182,37 @@ public class DocumentLoaderService {
 
         } catch (Exception e) {
             log.error("Error loading documents from resources", e);
+        }
+    }
+
+    /**
+     * Returns true if the vector store contains no retrievable documents.
+     * Used to detect a stale hash-tracking file after Chroma has been reset.
+     */
+    private boolean isVectorStoreEmpty() {
+        try {
+            var results = vectorStore.similaritySearch("financial revenue profit company");
+            boolean empty = (results == null || results.isEmpty());
+            log.info("Vector store emptiness check: {}", empty ? "EMPTY" : "populated");
+            return empty;
+        } catch (Exception e) {
+            // If the collection doesn't exist yet or the search fails, treat as empty
+            log.warn("Vector store emptiness check failed ({}), treating as empty", e.getMessage());
+            return true;
+        }
+    }
+
+    /**
+     * Delete the hash tracking file so all documents are re-ingested on this run.
+     */
+    private void resetHashTrackingFile() {
+        try {
+            File trackingFile = new File(HASH_TRACKING_FILE);
+            if (trackingFile.exists() && trackingFile.delete()) {
+                log.info("Deleted stale hash tracking file: {}", HASH_TRACKING_FILE);
+            }
+        } catch (Exception e) {
+            log.warn("Could not delete stale hash tracking file: {}", e.getMessage());
         }
     }
 
