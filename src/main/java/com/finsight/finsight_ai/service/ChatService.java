@@ -141,11 +141,11 @@ public class ChatService {
 
             // Get AI response
             String aiRawResponse = aiResponseService.getAIResponse(finalSystemPrompt, userPrompt);
-            log.debug("Raw AI Response: {}", aiRawResponse);
+            log.info("Raw AI Response: {}", aiRawResponse);
 
             // Parse AI response
             ChatResponse parsedResponse = responseParserService.parseAIResponse(aiRawResponse);
-            log.debug("Parsed AI Response: {}", parsedResponse);
+            log.info("Parsed AI Response: {}", parsedResponse);
 
             // VALIDATE AND CLEAN CHART DATA
             parsedResponse = validateAndCleanChartData(parsedResponse);
