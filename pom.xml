@@ -68,6 +68,16 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ssooidc</artifactId>
         </dependency>
+        <!-- HTTP clients - needed to configure custom socket/read timeouts
+             for slow models (e.g. Claude Opus) in BedrockClientConfig -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>apache-client</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>netty-nio-client</artifactId>
+        </dependency>
         <!--        <dependency>-->
         <!--            <groupId>software.amazon.awssdk</groupId>-->
         <!--            <artifactId>bedrockruntime</artifactId>-->
