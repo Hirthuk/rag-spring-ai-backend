@@ -57,44 +57,35 @@ public class FinancialAssistantService {
             - Forecasts must be realistic and evidence-based
             - Clearly label as projected values
 
-            RESPONSE FORMAT (REQUIRED):
+            RESPONSE FORMAT (STRICT - keep concise):
 
             CURRENT COMPANY HEALTH
-            Revenue:
-            Profit:
-            Growth Rate:
-            Financial Status:
+            Revenue: [Latest figure with year]
+            Profit: [Latest figure with year]
+            Growth Rate: [CAGR %]
+            Financial Status: [Classification]
 
             HISTORICAL PERFORMANCE
-            2020 Revenue:
-            2020 Profit:
-            2021 Revenue:
-            2021 Profit:
-            [Continue for all available years]
+            [List 5-7 most recent years: Year Revenue: Amount, Profit: Amount]
 
             KEY INSIGHTS
-            * Insight 1
-            * Insight 2
-            * Insight 3
-            [Add more as needed]
+            * [Brief insight 1]
+            * [Brief insight 2]
+            * [Brief insight 3]
 
             FIVE-YEAR FORECAST
-            2025F
-            Projected Revenue:
-            Projected Profit:
-            2026F
-            Projected Revenue:
-            Projected Profit:
-            [Continue through 2029F]
+            2025F Revenue: [Amount] | Profit: [Amount]
+            2026F Revenue: [Amount] | Profit: [Amount]
+            2027F Revenue: [Amount] | Profit: [Amount]
+            2028F Revenue: [Amount] | Profit: [Amount]
+            2029F Revenue: [Amount] | Profit: [Amount]
 
             RISKS
-            * Risk 1
-            * Risk 2
-            * Risk 3
-            [Add more as needed]
+            * [Brief risk 1]
+            * [Brief risk 2]
 
             EXECUTIVE OUTLOOK
-            [Concise investment-style conclusion on growth outlook]
+            [1-2 sentences: Classification + brief reason]
 
             CRITICAL REQUIREMENTS:
             ✓ Always show historical revenue and profit
@@ -191,21 +182,18 @@ public class FinancialAssistantService {
 
     private String buildFinancialContext(List<Document> documents) {
         StringBuilder context = new StringBuilder();
-        context.append("FINANCIAL DATA:\n");
 
         if (documents.isEmpty()) {
-            context.append("No financial documents found.");
-            return context.toString();
+            return "";
         }
 
-        // Include up to 4 documents with more content for financial analysis
-        int docCount = Math.min(4, documents.size());
+        // Include up to 2 documents, 600 chars max - prioritize token budget for response
+        int docCount = Math.min(2, documents.size());
         for (int i = 0; i < docCount; i++) {
             Document doc = documents.get(i);
             String text = doc.getText();
-            // Include more content - up to 800 chars per document
-            String truncated = text.length() > 800 ? text.substring(0, 800) + "..." : text;
-            context.append("\nDocument ").append(i + 1).append(":\n").append(truncated).append("\n");
+            String truncated = text.length() > 600 ? text.substring(0, 600) : text;
+            context.append(truncated).append("\n\n");
         }
 
         return context.toString();
