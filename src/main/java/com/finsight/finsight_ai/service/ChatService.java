@@ -11,7 +11,9 @@ import com.finsight.finsight_ai.service.search.SearchRoutingService;
 import com.finsight.finsight_ai.service.search.TavilySearchService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -186,6 +188,120 @@ public class ChatService {
     // Convenience method without systemMessage
     public ChatResponse askQuestion(String conversationId, String userMessage) {
         return askQuestion(conversationId, userMessage, null);
+    }
+
+    /**
+     * Streaming variant of askQuestion. Returns Server-Sent Events so the frontend
+     * can render the answer token-by-token (typing effect). Event types:
+     *   - "token": a chunk of the answer text (append these as they arrive)
+     *   - "chart": JSON array of chart data points (sent once, after the text)
+     *   - "done" : terminal marker ("[DONE]")
+     *   - "error": an error message
+     * Routing mirrors askQuestion: financial questions stream the FinSight analysis;
+     * casual/general questions stream a plain-text conversational reply.
+     */
+    public Flux<ServerSentEvent<String>> streamQuestion(String conversationId, String userMessage, String systemMessage) {
+        try {
+            if (userMessage == null || userMessage.trim().isEmpty()) {
+                return Flux.just(
+                        ServerSentEvent.<String>builder("User message cannot be empty.").event("error").build(),
+                        ServerSentEvent.<String>builder("[DONE]").event("done").build()
+                );
+            }
+            log.info("Streaming question: {}", userMessage);
+
+            // FINANCIAL ROUTE - stream the FinSight analysis + chart data
+            if (isFinancialAnalysisQuestion(userMessage) && financialAssistantService.isPresent()) {
+                log.info("🧠 Streaming via FinancialAssistantService");
+                memoryService.addMessage(conversationId, "USER", userMessage);
+                StringBuilder acc = new StringBuilder();
+                return financialAssistantService.get().streamAnalysis(userMessage)
+                        .doOnNext(sse -> {
+                            if ("token".equals(sse.event()) && sse.data() != null) {
+                                acc.append(sse.data());
+                            }
+                        })
+                        .doOnComplete(() -> {
+                            if (acc.length() > 0) {
+                                memoryService.addMessage(conversationId, "ASSISTANT", acc.toString());
+                            }
+                        });
+            }
+
+            // CASUAL / GENERAL ROUTE - stream a plain-text reply
+            boolean casual = isCasualMessage(userMessage);
+
+            List<ChatMemoryMessage> history = memoryService.getHistory(conversationId);
+            String memoryContext = promptBuilderService.buildConversationMemory(history);
+
+            List<Document> documents = new ArrayList<>();
+            if (!casual && retrievalService.isPresent()) {
+                try {
+                    RetrievalService service = retrievalService.get();
+                    String retrievalQuery = service.prepareRetrievalQuery(userMessage);
+                    documents = service.retrieveRelevantDocuments(retrievalQuery);
+                } catch (Exception e) {
+                    log.warn("RAG retrieval failed during stream, continuing without it: {}", e.getMessage());
+                }
+            }
+            String ragContext = promptBuilderService.buildContext(documents);
+            String userPrompt = promptBuilderService.buildUserPrompt(memoryContext, ragContext, "", userMessage);
+            String sysPrompt = casual ? getCasualStreamingPrompt() : getGeneralStreamingPrompt();
+
+            memoryService.addMessage(conversationId, "USER", userMessage);
+            StringBuilder acc = new StringBuilder();
+
+            Flux<ServerSentEvent<String>> tokens = aiResponseService.streamResponse(sysPrompt, userPrompt)
+                    .doOnNext(acc::append)
+                    .map(t -> ServerSentEvent.<String>builder(t).event("token").build());
+
+            Flux<ServerSentEvent<String>> tail = Flux.defer(() -> {
+                if (acc.length() > 0) {
+                    memoryService.addMessage(conversationId, "ASSISTANT", acc.toString());
+                }
+                return Flux.just(
+                        ServerSentEvent.<String>builder("[]").event("chart").build(),
+                        ServerSentEvent.<String>builder("[DONE]").event("done").build()
+                );
+            });
+
+            return Flux.concat(tokens, tail)
+                    .onErrorResume(e -> {
+                        log.error("Streaming error: {}", e.getMessage());
+                        return Flux.just(
+                                ServerSentEvent.<String>builder("Error: " + e.getMessage()).event("error").build(),
+                                ServerSentEvent.<String>builder("[DONE]").event("done").build()
+                        );
+                    });
+
+        } catch (Exception e) {
+            log.error("streamQuestion failed: {}", e.getMessage(), e);
+            return Flux.just(
+                    ServerSentEvent.<String>builder("I encountered an error while processing your request.").event("error").build(),
+                    ServerSentEvent.<String>builder("[DONE]").event("done").build()
+            );
+        }
+    }
+
+    /** Minimal plain-text system prompt for casual/greeting messages in streaming mode. */
+    private String getCasualStreamingPrompt() {
+        return """
+                You are FinSight AI, a friendly financial intelligence assistant.
+                The user sent a casual or conversational message (greeting, introduction,
+                thanks, small talk). Reply naturally and warmly in 1-3 sentences as PLAIN TEXT.
+                Do NOT output JSON, code blocks, company financials, or chart data unless the
+                user explicitly asks for analysis.
+                """;
+    }
+
+    /** Plain-text system prompt for general (non-financial) questions in streaming mode. */
+    private String getGeneralStreamingPrompt() {
+        return """
+                You are FinSight AI, a helpful assistant. Answer the user's question clearly
+                and concisely as PLAIN TEXT (no JSON, no code fences). Use the provided context
+                and conversation history if they are relevant; otherwise answer from general
+                knowledge.
+                """;
     }
 
     /**

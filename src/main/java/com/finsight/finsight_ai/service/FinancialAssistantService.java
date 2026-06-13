@@ -11,7 +11,9 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 
 import java.util.*;
 
@@ -163,6 +165,86 @@ public class FinancialAssistantService {
             log.error("Error in financial analysis: {}", e.getMessage(), e);
             return "{\"answer\": \"Error: " + e.getMessage() + "\", \"chartType\": \"none\", \"chartData\": []}";
         }
+    }
+
+    /**
+     * Streaming variant of analyzeFinancials. Emits the analysis text token-by-token
+     * as SSE "token" events for a live typing effect, then a final "chart" event with
+     * the extracted chart data JSON, and a "done" event. Inner unescaped quotes etc.
+     * are irrelevant here because tokens are streamed as raw text (not JSON).
+     */
+    public Flux<ServerSentEvent<String>> streamAnalysis(String query) {
+        log.info("Streaming financial analysis request: {}", query);
+
+        List<Document> relevantDocs;
+        try {
+            relevantDocs = vectorStore.similaritySearch(query);
+        } catch (Exception e) {
+            log.error("Vector search failed for streaming: {}", e.getMessage());
+            relevantDocs = Collections.emptyList();
+        }
+
+        if (relevantDocs == null || relevantDocs.isEmpty()) {
+            return Flux.just(
+                    ServerSentEvent.<String>builder("No financial data available. Please upload financial documents first.").event("token").build(),
+                    ServerSentEvent.<String>builder("[]").event("chart").build(),
+                    ServerSentEvent.<String>builder("[DONE]").event("done").build()
+            );
+        }
+
+        String context = buildFinancialContext(relevantDocs);
+        String userPrompt = buildDetailedPrompt(query, context);
+
+        SystemMessage systemMessage = new SystemMessage(FINANCIAL_SYSTEM_PROMPT);
+        UserMessage userMsg = new UserMessage("USER REQUEST:\n" + userPrompt);
+        ChatOptions options = ChatOptions.builder()
+                .maxTokens(maxTokens)
+                .temperature(temperature)
+                .topP(topP)
+                .build();
+        Prompt prompt = new Prompt(java.util.Arrays.asList(systemMessage, userMsg), options);
+
+        StringBuilder accumulated = new StringBuilder();
+
+        Flux<ServerSentEvent<String>> tokens = chatModel.stream(prompt)
+                .map(this::extractText)
+                .filter(t -> !t.isEmpty())
+                .doOnNext(accumulated::append)
+                .map(t -> ServerSentEvent.<String>builder(t).event("token").build());
+
+        // After the text finishes streaming, emit the chart data (extracted from the
+        // full accumulated text) followed by a completion marker.
+        Flux<ServerSentEvent<String>> tail = Flux.defer(() -> {
+            String chartJson = "[]";
+            try {
+                chartJson = new com.fasterxml.jackson.databind.ObjectMapper()
+                        .writeValueAsString(extractChartDataFromText(accumulated.toString()));
+            } catch (Exception e) {
+                log.warn("Could not build chart JSON for stream: {}", e.getMessage());
+            }
+            return Flux.just(
+                    ServerSentEvent.<String>builder(chartJson).event("chart").build(),
+                    ServerSentEvent.<String>builder("[DONE]").event("done").build()
+            );
+        });
+
+        return Flux.concat(tokens, tail)
+                .onErrorResume(e -> {
+                    log.error("Financial stream error: {}", e.getMessage());
+                    return Flux.just(
+                            ServerSentEvent.<String>builder("Error: " + e.getMessage()).event("error").build(),
+                            ServerSentEvent.<String>builder("[DONE]").event("done").build()
+                    );
+                });
+    }
+
+    /** Null-safe extraction of the text from a streaming ChatResponse chunk. */
+    private String extractText(ChatResponse chunk) {
+        if (chunk == null || chunk.getResult() == null || chunk.getResult().getOutput() == null) {
+            return "";
+        }
+        String text = chunk.getResult().getOutput().getText();
+        return text == null ? "" : text;
     }
 
     private String callModelWithSystemPrompt(String userPrompt) {

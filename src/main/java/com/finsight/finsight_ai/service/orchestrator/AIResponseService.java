@@ -9,6 +9,7 @@ import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
 
@@ -29,6 +30,33 @@ public class AIResponseService {
 
     public AIResponseService(BedrockProxyChatModel chatModel) {
         this.chatModel = chatModel;
+    }
+
+    /**
+     * Streaming variant - emits the model's plain-text output token-by-token as a
+     * Flux of text chunks (used by the SSE streaming endpoint for a typing effect).
+     */
+    public Flux<String> streamResponse(String systemPrompt, String userPrompt) {
+        ChatOptions options = ChatOptions.builder()
+                .maxTokens(maxTokens)
+                .temperature(temperature)
+                .topP(topP)
+                .build();
+
+        Prompt prompt = new Prompt(
+                List.of(new SystemMessage(systemPrompt), new UserMessage(userPrompt)),
+                options
+        );
+
+        return chatModel.stream(prompt)
+                .map(chunk -> {
+                    if (chunk == null || chunk.getResult() == null || chunk.getResult().getOutput() == null) {
+                        return "";
+                    }
+                    String text = chunk.getResult().getOutput().getText();
+                    return text == null ? "" : text;
+                })
+                .filter(t -> !t.isEmpty());
     }
 
     public String getAIResponse(String systemPrompt, String userPrompt) {
