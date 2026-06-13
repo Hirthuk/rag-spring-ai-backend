@@ -142,8 +142,11 @@ public class FinancialAssistantService {
 
             if (relevantDocs.isEmpty()) {
                 log.warn("No financial documents found for query: {}", query);
+                log.info("📊 RESPONSE SOURCE [FINANCIAL] -> RAG(documents): NO | Internet(Tavily): NO | Model base-knowledge only: NO (returning 'no data' message)");
                 return "{\"answer\": \"No financial data available. Please upload financial documents first.\", \"chartType\": \"none\", \"chartData\": []}";
             }
+
+            log.info("📊 RESPONSE SOURCE [FINANCIAL] -> RAG(documents): YES ({} docs) | Internet(Tavily): NO | Model base-knowledge only: NO", relevantDocs.size());
 
             for (int i = 0; i < relevantDocs.size(); i++) {
                 log.info("Document {}: {} chars", i + 1, relevantDocs.get(i).getText().length());
@@ -185,12 +188,15 @@ public class FinancialAssistantService {
         }
 
         if (relevantDocs == null || relevantDocs.isEmpty()) {
+            log.info("📊 RESPONSE SOURCE [FINANCIAL-STREAM] -> RAG(documents): NO | Internet(Tavily): NO | Model base-knowledge only: NO (returning 'no data' message)");
             return Flux.just(
                     ServerSentEvent.<String>builder("No financial data available. Please upload financial documents first.").event("token").build(),
                     ServerSentEvent.<String>builder("[]").event("chart").build(),
                     ServerSentEvent.<String>builder("[DONE]").event("done").build()
             );
         }
+
+        log.info("📊 RESPONSE SOURCE [FINANCIAL-STREAM] -> RAG(documents): YES ({} docs) | Internet(Tavily): NO | Model base-knowledge only: NO", relevantDocs.size());
 
         String context = buildFinancialContext(relevantDocs);
         String userPrompt = buildDetailedPrompt(query, context);

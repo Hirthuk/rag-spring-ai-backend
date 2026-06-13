@@ -144,6 +144,11 @@ public class ChatService {
                     ? getCasualSystemPrompt()
                     : buildFinalSystemPrompt(systemMessage);
 
+            // Log which data source(s) are feeding this response
+            boolean ragUsed = !documents.isEmpty();
+            boolean internetUsed = internetContext != null && !internetContext.isEmpty();
+            logResponseSources("CHAT", ragUsed, documents.size(), internetUsed);
+
             // Save user message BEFORE getting AI response
             memoryService.addMessage(conversationId, "USER", userMessage);
             log.info("Added user message to memory, message count now: {}", memoryService.getMessageCount(conversationId));
@@ -247,6 +252,9 @@ public class ChatService {
             String ragContext = promptBuilderService.buildContext(documents);
             String userPrompt = promptBuilderService.buildUserPrompt(memoryContext, ragContext, "", userMessage);
             String sysPrompt = casual ? getCasualStreamingPrompt() : getGeneralStreamingPrompt();
+
+            // Internet search is not used on the streaming path; log the source mix
+            logResponseSources("CHAT-STREAM", !documents.isEmpty(), documents.size(), false);
 
             memoryService.addMessage(conversationId, "USER", userMessage);
             StringBuilder acc = new StringBuilder();
@@ -381,6 +389,20 @@ public class ChatService {
 
         // Very short messages with no financial intent are treated as casual
         return lower.length() <= 15 && !isFinancialAnalysisQuestion(userMessage);
+    }
+
+    /**
+     * Log (logs only) which data source(s) fed the response: RAG documents,
+     * internet search, or the model's own base knowledge when neither is present.
+     */
+    private void logResponseSources(String path, boolean ragUsed, int docCount, boolean internetUsed) {
+        boolean modelOnly = !ragUsed && !internetUsed;
+        log.info("📊 RESPONSE SOURCE [{}] -> RAG(documents): {}{} | Internet(Tavily): {} | Model base-knowledge only: {}",
+                path,
+                ragUsed ? "YES" : "NO",
+                ragUsed ? " (" + docCount + " docs)" : "",
+                internetUsed ? "YES" : "NO",
+                modelOnly ? "YES" : "NO");
     }
 
     /**
