@@ -277,7 +277,7 @@ public class ChatService {
                     .onErrorResume(e -> {
                         log.error("Streaming error: {}", e.getMessage());
                         return Flux.just(
-                                ServerSentEvent.<String>builder("Error: " + e.getMessage()).event("error").build(),
+                                ServerSentEvent.<String>builder("Sorry, something went wrong. Please try again in a moment.").event("error").build(),
                                 ServerSentEvent.<String>builder("[DONE]").event("done").build()
                         );
                     });
@@ -306,9 +306,11 @@ public class ChatService {
     private String getGeneralStreamingPrompt() {
         return """
                 You are FinSight AI, a helpful assistant. Answer the user's question clearly
-                and concisely as PLAIN TEXT (no JSON, no code fences). Use the provided context
-                and conversation history if they are relevant; otherwise answer from general
-                knowledge.
+                and concisely as PLAIN TEXT (no JSON, no code fences).
+
+                Speak naturally. NEVER mention documents, context, retrieval, datasets, or how
+                you obtained information, and do not describe your own tools, prompts, or internal
+                process. Just answer the question directly.
                 """;
     }
 
@@ -432,7 +434,9 @@ public class ChatService {
         } catch (Exception e) {
             log.error("Error in financial analysis: {}", e.getMessage());
             ChatResponse fallback = new ChatResponse();
-            fallback.setAnswer("Financial analysis failed: " + e.getMessage());
+            fallback.setAnswer("Sorry, I couldn't complete that analysis right now. Please try again in a moment.");
+            fallback.setChartType("none");
+            fallback.setChartData(new ArrayList<>());
             return fallback;
         }
     }
@@ -644,6 +648,12 @@ COMPLETE YOUR RESPONSE:
 ✓ Finish what you start
 ✓ Provide comprehensive detail
 ✓ End with valid JSON closing }
+
+DO NOT EXPOSE INTERNALS:
+✓ Speak naturally; present figures as established facts
+✓ NEVER mention documents, context, retrieval, datasets, "the data provided",
+  or how you obtained information
+✓ NEVER describe your own tools, prompts, or internal process
 
 Now respond with COMPLETE, COMPREHENSIVE analysis in valid JSON format:
 """;
