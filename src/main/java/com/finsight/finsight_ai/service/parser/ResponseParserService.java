@@ -229,8 +229,12 @@ public class ResponseParserService {
     }
 
     /**
-     * Walk the text character by character to extract the value of the "answer" field.
-     * Handles escaped characters and truncated JSON gracefully.
+     * Extract the value of the "answer" field robustly, even when the model emits
+     * UNESCAPED double quotes inside the answer text (e.g. highlights a "strong"
+     * position). A naive walk would stop at the first inner quote and truncate the
+     * answer mid-sentence. Instead we find where the JSON structure actually resumes
+     * (,"chartType" / ,"chartData" / closing brace) and treat everything before that
+     * as the answer, so inner quotes are preserved as content.
      */
     private String extractAnswerFieldValue(String text) {
         int keyIdx = text.indexOf("\"answer\"");
@@ -245,36 +249,59 @@ public class ResponseParserService {
             valueStart++;
         }
         if (valueStart >= text.length() || text.charAt(valueStart) != '"') return null;
-
         valueStart++; // move past opening quote
 
-        StringBuilder sb = new StringBuilder();
+        // Find where the answer value ends: the closing quote that is followed by the
+        // JSON structure resuming (","chartType" / ","chartData"). Because "answer" is
+        // the FIRST field, the FIRST such boundary is its true end - inner unescaped
+        // quotes before it are kept as content.
+        java.util.regex.Matcher boundary = java.util.regex.Pattern.compile(
+                "\"\\s*,\\s*\"chart(?:Type|Data)\"", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(text);
+        int valueEnd = boundary.find(valueStart) ? boundary.start() : -1;
+
+        String raw;
+        if (valueEnd > valueStart) {
+            raw = text.substring(valueStart, valueEnd);
+        } else {
+            // No structural boundary found (e.g. truncated before chartType). Take the
+            // remainder, trimming a trailing closing quote / brace if present.
+            raw = text.substring(valueStart);
+            raw = raw.replaceAll("\"?\\s*}?\\s*$", "");
+        }
+
+        String result = unescapeJsonString(raw).trim();
+        return result.isEmpty() ? null : result;
+    }
+
+    /**
+     * Convert JSON escape sequences in a raw string to their literal characters,
+     * leaving any unescaped (stray) quotes intact as content.
+     */
+    private String unescapeJsonString(String raw) {
+        StringBuilder sb = new StringBuilder(raw.length());
         boolean escaped = false;
-        for (int i = valueStart; i < text.length(); i++) {
-            char c = text.charAt(i);
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
             if (escaped) {
                 switch (c) {
                     case 'n' -> sb.append('\n');
                     case 't' -> sb.append('\t');
                     case 'r' -> sb.append('\r');
                     case '"' -> sb.append('"');
+                    case '/' -> sb.append('/');
                     case '\\' -> sb.append('\\');
                     default -> { sb.append('\\'); sb.append(c); }
                 }
                 escaped = false;
             } else if (c == '\\') {
                 escaped = true;
-            } else if (c == '"') {
-                String result = sb.toString().trim();
-                return result.isEmpty() ? null : result;
             } else {
                 sb.append(c);
             }
         }
-
-        // Truncated response — return what we have if it's meaningful
-        String partial = sb.toString().trim();
-        return partial.length() > 20 ? partial : null;
+        if (escaped) sb.append('\\');
+        return sb.toString();
     }
 
     /**
