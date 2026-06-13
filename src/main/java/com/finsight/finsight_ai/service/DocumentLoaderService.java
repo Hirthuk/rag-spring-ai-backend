@@ -49,8 +49,13 @@ public class DocumentLoaderService {
             ".xlsx", ".xls", ".txt", ".csv", ".json", ".md", ".log", ".xml", ".pdf", ".docx", ".doc"
     );
 
-    // Conservative chunk sizes for Bedrock Cohere embedding model
-    private static final int MAX_CHUNK_SIZE = 1500;  // Reduced from 2000 to be safer
+    // Conservative chunk sizes for Bedrock Cohere embedding model.
+    // cohere.embed-multilingual-v3 has a ~512 token input limit. Numeric-dense
+    // financial chunks (P&L detail) tokenize into far more tokens per character
+    // than prose, so a 1500-char chunk overflowed the limit and was rejected with
+    // "Invalid parameter combination", then silently truncated (losing ~half the
+    // chunk). 700 chars keeps even number-heavy chunks within the token limit.
+    private static final int MAX_CHUNK_SIZE = 700;   // Lowered from 1500 to fit Cohere's 512-token limit
     private static final int MIN_CHUNK_SIZE = 100;    // Minimum meaningful chunk size
     private static final int OVERLAP_SIZE = 100;      // Overlap between chunks
 
