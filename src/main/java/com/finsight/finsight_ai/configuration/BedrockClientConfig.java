@@ -5,6 +5,7 @@ import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
+import software.amazon.awssdk.http.nio.netty.Http2Configuration;
 import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeAsyncClient;
@@ -103,7 +104,12 @@ public class BedrockClientConfig {
                         .readTimeout(Duration.ofSeconds(socketTimeoutSeconds))
                         .writeTimeout(Duration.ofSeconds(socketTimeoutSeconds))
                         .connectionTimeout(Duration.ofSeconds(connectionTimeoutSeconds))
-                        .connectionAcquisitionTimeout(Duration.ofSeconds(connectionTimeoutSeconds)))
+                        .connectionAcquisitionTimeout(Duration.ofSeconds(connectionTimeoutSeconds))
+                        // Long ping interval prevents SslClosedEngineException spam when the
+                        // ping timer fires just as a long streaming call closes its SSL session.
+                        .http2Configuration(Http2Configuration.builder()
+                                .healthCheckPingPeriod(Duration.ofMinutes(10))
+                                .build()))
                 .overrideConfiguration(ClientOverrideConfiguration.builder()
                         .apiCallTimeout(Duration.ofSeconds(apiCallTimeoutSeconds))
                         .apiCallAttemptTimeout(Duration.ofSeconds(apiCallTimeoutSeconds))

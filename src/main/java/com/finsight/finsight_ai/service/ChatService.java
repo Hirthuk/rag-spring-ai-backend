@@ -59,107 +59,55 @@ public class ChatService {
     ) {
 
         try {
-            log.info("Processing question: {}", userMessage);
-            log.info("RetrievalService present = {}", retrievalService.isPresent());
-
             // Check if this is a financial analysis question - route to FinancialAssistantService
             if (isFinancialAnalysisQuestion(userMessage) && financialAssistantService.isPresent()) {
-                log.info("🧠 Routing to FinancialAssistantService for detailed financial analysis");
                 return handleFinancialQuestion(userMessage, conversationId);
             }
 
             // Check memory size before adding
             int currentMessageCount = memoryService.getMessageCount(conversationId);
-            log.info("Current conversation has {} messages before adding new user message", currentMessageCount);
-
             if (userMessage == null || userMessage.trim().isEmpty()) {
                 return ChatResponse.error("User message cannot be empty.");
             }
 
-            // Get conversation history
             List<ChatMemoryMessage> history = memoryService.getHistory(conversationId);
             String memoryContext = promptBuilderService.buildConversationMemory(history);
 
-            log.info("Memory context built from {} history messages", history.size());
-
-            // Try to retrieve relevant documents if retrieval service is available
-            // SKIP RAG for casual/greeting messages to avoid injecting irrelevant financial data
             List<Document> documents = new ArrayList<>();
             boolean isCasual = isCasualMessage(userMessage);
-            if (isCasual) {
-                log.info("💬 Casual/greeting message detected - skipping RAG retrieval");
-            } else if (retrievalService.isPresent()) {
+            if (!isCasual && retrievalService.isPresent()) {
                 try {
                     RetrievalService service = retrievalService.get();
-                    String retrievalQuery = service.prepareRetrievalQuery(userMessage);
-                    documents = service.retrieveRelevantDocuments(retrievalQuery);
-
-                    if (!documents.isEmpty()) {
-                        log.info("RAG ACTIVE - {} documents supplied to LLM", documents.size());
-                    } else {
-                        log.warn("RAG INACTIVE - No documents supplied to LLM");
-                    }
-                    log.info("Retrieved {} relevant documents", documents.size());
-
-                    documents.forEach(doc -> log.info("RAG DOC = {}", doc.getText()));
+                    documents = service.retrieveRelevantDocuments(service.prepareRetrievalQuery(userMessage));
                 } catch (Exception e) {
-                    log.warn("Vector store retrieval failed, proceeding without RAG: {}", e.getMessage());
-                    documents = new ArrayList<>();
+                    log.warn("RAG retrieval failed: {}", e.getMessage());
                 }
-            } else {
-                log.info("Vector store retrieval not available, proceeding without RAG");
             }
 
-            // Build RAG context
             String ragContext = promptBuilderService.buildContext(documents);
 
-            log.info("================================");
-            log.info("RAG CONTEXT LENGTH = {}", ragContext.length());
-            log.info("RAG CONTEXT = {}", ragContext);
-            log.info("================================");
-
-            // Build user prompt
             String internetContext = "";
+            boolean tavilyUsed = false;
             if (!isCasual && searchRoutingService.shouldUseInternetSearch(userMessage)) {
                 internetContext = tavilySearchService.search(userMessage);
-                log.info("Internet Search Used");
-                log.info("Internet Context: {}", internetContext);
+                tavilyUsed = internetContext != null && !internetContext.isEmpty();
             }
 
             String userPrompt = promptBuilderService.buildUserPrompt(
-                    memoryContext,
-                    ragContext,
-                    internetContext,
-                    userMessage
-            );
+                    memoryContext, ragContext, internetContext, userMessage);
 
-            log.info("================================");
-            log.info("FINAL USER PROMPT");
-            log.info(userPrompt);
-            log.info("================================");
-
-            // Build system prompt - use a simple conversational prompt for casual
-            // messages so the model doesn't launch into financial analysis for "Hi"
             String finalSystemPrompt = isCasual
                     ? getCasualSystemPrompt()
                     : buildFinalSystemPrompt(systemMessage);
 
-            // Log which data source(s) are feeding this response
-            boolean ragUsed = !documents.isEmpty();
-            boolean internetUsed = internetContext != null && !internetContext.isEmpty();
-            logResponseSources("CHAT", ragUsed, documents.size(), internetUsed);
+            log.info("[CHAT] RAG: {} | Tavily: {}",
+                    documents.isEmpty() ? "No" : "Yes (" + documents.size() + " docs)",
+                    tavilyUsed ? "Yes" : "No");
 
-            // Save user message BEFORE getting AI response
             memoryService.addMessage(conversationId, "USER", userMessage);
-            log.info("Added user message to memory, message count now: {}", memoryService.getMessageCount(conversationId));
 
-            // Get AI response
             String aiRawResponse = aiResponseService.getAIResponse(finalSystemPrompt, userPrompt);
-            log.info("Raw AI Response: {}", aiRawResponse);
-
-            // Parse AI response
             ChatResponse parsedResponse = responseParserService.parseAIResponse(aiRawResponse);
-            log.info("Parsed AI Response: {}", parsedResponse);
 
             // VALIDATE AND CLEAN CHART DATA
             parsedResponse = validateAndCleanChartData(parsedResponse);
@@ -172,14 +120,10 @@ public class ChatService {
                 parsedResponse.setChartType("none");
             }
 
-            // Save ONLY the answer text, not the full JSON response
             String answerText = parsedResponse.getAnswer();
             if (answerText != null && !answerText.trim().isEmpty()) {
                 memoryService.addMessage(conversationId, "ASSISTANT", answerText);
-                log.info("Added assistant answer to memory (length: {} chars), message count now: {}",
-                        answerText.length(), memoryService.getMessageCount(conversationId));
-            } else {
-                log.warn("Empty answer from AI, not adding to memory");
+                log.info("[CHAT] Response: {}", answerText);
             }
 
             return parsedResponse;
@@ -213,11 +157,8 @@ public class ChatService {
                         ServerSentEvent.<String>builder("[DONE]").event("done").build()
                 );
             }
-            log.info("Streaming question: {}", userMessage);
-
             // FINANCIAL ROUTE - stream the FinSight analysis + chart data
             if (isFinancialAnalysisQuestion(userMessage) && financialAssistantService.isPresent()) {
-                log.info("🧠 Streaming via FinancialAssistantService");
                 memoryService.addMessage(conversationId, "USER", userMessage);
                 StringBuilder acc = new StringBuilder();
                 return financialAssistantService.get().streamAnalysis(userMessage)
@@ -228,6 +169,9 @@ public class ChatService {
                         })
                         .doOnComplete(() -> {
                             if (acc.length() > 0) {
+                                // The raw accumulated text from FinancialAssistantService
+                                // already has CHARTDATA_JSON stripped before token emission,
+                                // so acc contains the clean user-visible text.
                                 memoryService.addMessage(conversationId, "ASSISTANT", acc.toString());
                             }
                         });
@@ -243,18 +187,17 @@ public class ChatService {
             if (!casual && retrievalService.isPresent()) {
                 try {
                     RetrievalService service = retrievalService.get();
-                    String retrievalQuery = service.prepareRetrievalQuery(userMessage);
-                    documents = service.retrieveRelevantDocuments(retrievalQuery);
+                    documents = service.retrieveRelevantDocuments(service.prepareRetrievalQuery(userMessage));
                 } catch (Exception e) {
-                    log.warn("RAG retrieval failed during stream, continuing without it: {}", e.getMessage());
+                    log.warn("RAG retrieval failed: {}", e.getMessage());
                 }
             }
             String ragContext = promptBuilderService.buildContext(documents);
             String userPrompt = promptBuilderService.buildUserPrompt(memoryContext, ragContext, "", userMessage);
             String sysPrompt = casual ? getCasualStreamingPrompt() : getGeneralStreamingPrompt();
 
-            // Internet search is not used on the streaming path; log the source mix
-            logResponseSources("CHAT-STREAM", !documents.isEmpty(), documents.size(), false);
+            log.info("[CHAT-STREAM] RAG: {} | Tavily: No",
+                    documents.isEmpty() ? "No" : "Yes (" + documents.size() + " docs)");
 
             memoryService.addMessage(conversationId, "USER", userMessage);
             StringBuilder acc = new StringBuilder();
@@ -266,6 +209,7 @@ public class ChatService {
             Flux<ServerSentEvent<String>> tail = Flux.defer(() -> {
                 if (acc.length() > 0) {
                     memoryService.addMessage(conversationId, "ASSISTANT", acc.toString());
+                    log.info("[CHAT-STREAM] Response: {}", acc);
                 }
                 return Flux.just(
                         ServerSentEvent.<String>builder("[]").event("chart").build(),
@@ -302,66 +246,155 @@ public class ChatService {
                 """;
     }
 
-    /** Plain-text system prompt for general (non-financial) questions in streaming mode. */
+    /** Markdown-formatted system prompt for general (non-financial) questions in streaming mode. */
     private String getGeneralStreamingPrompt() {
         return """
-                You are FinSight AI, a helpful assistant. Answer the user's question clearly
-                and concisely as PLAIN TEXT (no JSON, no code fences).
+                You are FinSight AI, a financial intelligence assistant. Answer the user's question
+                clearly and concisely using Markdown formatting.
 
-                Speak naturally. NEVER mention documents, context, retrieval, datasets, or how
-                you obtained information, and do not describe your own tools, prompts, or internal
-                process. Just answer the question directly.
+                CRITICAL RULE — RAW DATA IS FORBIDDEN:
+                If the context contains JSON, raw data structures, or financial figures, you MUST
+                synthesise and analyse them — NEVER echo or display raw JSON, code blocks, or
+                unprocessed data. Transform any raw data into a professional analyst narrative with
+                headers, bullet points, and tables.
+
+                Formatting rules:
+                - Use ## or ### headers for distinct sections
+                - Use **bold** for key numbers, KPIs, and important terms
+                - Use bullet lists or numbered lists when enumerating facts or steps
+                - For financial data: present as clean tables or structured bullets, NOT raw JSON
+                - Keep paragraphs short (2-3 sentences max)
+
+                Speak as a senior financial analyst. NEVER mention documents, context, retrieval,
+                datasets, JSON, or your internal process. Just deliver the analysis directly.
                 """;
     }
 
     /**
-     * Check if question is financial analysis related (NOT just any question about companies)
-     * Must have clear financial analysis intent
+     * Routes any company, market, investment, comparison, strategic, or scenario question
+     * to FinancialAssistantService which handles all 8 levels of financial intelligence.
      */
     private boolean isFinancialAnalysisQuestion(String userMessage) {
-        // Reject greetings and casual messages
-        String lowerMessage = userMessage.toLowerCase().trim();
+        if (userMessage == null) return false;
+        String q = userMessage.toLowerCase().trim();
 
-        if (lowerMessage.matches("^(hi|hello|hey|greetings|my name is.*|who are you|what is your name|thanks|thank you).*")) {
-            return false;
-        }
+        // Never route greetings or personal questions
+        if (q.matches("^(hi|hello|hey|hii+|yo|greetings|good morning|good afternoon|good evening)[!. ]*$")) return false;
+        if (q.matches("^(who are you|what is your name|what can you do|how are you|what are you)[?. ]*$")) return false;
+        if (q.matches("^(thanks|thank you|thx|ok|okay|cool|nice|great|bye|goodbye)[!. ]*$")) return false;
+        if (q.matches("^(my name is|i am|i'm|this is|call me)\\s+.*")) return false;
 
-        // Must have explicit financial analysis keywords + company context
-        boolean hasFinancialKeyword =
-               lowerMessage.contains("financial") ||
-               lowerMessage.contains("revenue") ||
-               lowerMessage.contains("profit") ||
-               lowerMessage.contains("forecast") ||
-               lowerMessage.contains("ebitda") ||
-               lowerMessage.contains("cash flow") ||
-               lowerMessage.contains("valuation") ||
-               lowerMessage.contains("pe ratio") ||
-               lowerMessage.contains("roe") ||
-               lowerMessage.contains("roa") ||
-               lowerMessage.contains("margin") ||
-               lowerMessage.contains("turnover") ||
-               lowerMessage.contains("earnings") ||
-               lowerMessage.contains("growth analysis") ||
-               lowerMessage.contains("investment outlook");
+        // Block personal / generic questions whose subject is NOT a company
+        // e.g. "What is my name?", "Who am I?", "What time is it?", "Where do I live?"
+        if (q.matches("^(what|who|how|where|when|why)\\s+(is|are|was|were|am|do|does|did|can|could|should|would|will)\\s+(i|my|me|we|our|you|your|it|the|this|that|a|an)\\b.*")) return false;
+        // "Can you tell me your name?", "Do you know me?"
+        if (q.matches("^(can|could|would|do|did|have|has|is|are)\\s+(you|i|we|they)\\b.*") && !hasFinancialKeywordsQuick(q)) return false;
 
-        boolean hasCompanyName =
-               lowerMessage.contains("hcl") ||
-               lowerMessage.contains("tcs") ||
-               lowerMessage.contains("infosys") ||
-               lowerMessage.contains("wipro") ||
-               lowerMessage.contains("reliance") ||
-               lowerMessage.contains("hdfc") ||
-               lowerMessage.contains("bajaj") ||
-               lowerMessage.contains("icici") ||
-               lowerMessage.contains("axis");
+        // --- Level 1: company overview (known companies) ---
+        if (q.matches(".*(tell me about|what does|overview of|give me an overview|about|who is|describe).*(company|corp|inc|ltd|technologies|tech|bank|industries|motors|pharma|amazon|microsoft|google|apple|meta|netflix|nvidia|tesla|tcs|infosys|hcl|wipro|reliance|hdfc|bajaj|icici).*")) return true;
 
-        // Route to FinancialAssistant only if financial keyword + company,
-        // OR explicit financial analysis request
-        return (hasFinancialKeyword && (hasCompanyName || lowerMessage.contains("analysis"))) ||
-               lowerMessage.contains("financial analysis") ||
-               lowerMessage.contains("financial health") ||
-               lowerMessage.contains("5 year forecast") ||
-               lowerMessage.contains("5-year forecast");
+        // --- Level 2: historical financial data ---
+        boolean hasFinancialWord =
+                q.contains("revenue") || q.contains("profit") || q.contains("earnings") ||
+                q.contains("ebitda") || q.contains("cash flow") || q.contains("turnover") ||
+                q.contains("margin") || q.contains("growth") || q.contains("financial") ||
+                q.contains("sales") || q.contains("income") || q.contains("performance");
+        if (hasFinancialWord && (hasCompanyMention(q) || q.contains("historical") || q.contains("trend") || q.contains("last 5 year") || q.contains("last 3 year"))) return true;
+
+        // --- Level 1 / 2: ANY company (unknown names) with overview / growth intent ---
+        // Catches "Tell me about Presidio growth", "Show me Accenture revenue", etc.
+        boolean hasOverviewIntent =
+                q.contains("tell me about") || q.contains("overview of") || q.contains("give me an overview") ||
+                q.contains("growth of") || q.contains("performance of") || q.contains("history of") ||
+                q.contains("show me") || q.contains("analyse") || q.contains("analyze") ||
+                q.matches(".*how (is|was|has|did|have)\\b.*");
+        if (hasOverviewIntent && hasFinancialWord) return true;
+
+        // --- Level 3: health / weakness / strength diagnosis ---
+        if ((q.contains("health") || q.contains("diagnos") || q.contains("weakness") || q.contains("weakness") ||
+             q.contains("strength") || q.contains("identify risk") || q.contains("how is") || q.contains("how healthy")) && hasCompanyMention(q)) return true;
+
+        // --- Level 4: forecasting ---
+        if ((q.contains("predict") || q.contains("forecast") || q.contains("next 5 year") || q.contains("next 3 year") ||
+             q.contains("future revenue") || q.contains("future profit") || q.contains("will") && q.contains("reach")) && (hasCompanyMention(q) || hasFinancialWord)) return true;
+
+        // Future year mentions: "Where will X be in 2030?", "X revenue by 2028", "growth in 2031"
+        boolean hasFutureYear = q.matches(".*\\b(202[6-9]|203[0-9])\\b.*");
+        boolean hasFutureGrowthPhrase = q.contains("future growth") || q.contains("future of") ||
+                q.contains("by 20") || q.contains("in coming year") || q.contains("next few year") ||
+                q.contains("going forward") || q.contains("years from now") || q.contains("projected growth");
+        if (hasFutureYear || hasFutureGrowthPhrase) return true;
+
+        // --- Level 5: comparison ---
+        if ((q.contains("compare") || q.contains(" vs ") || q.contains(" versus ") || q.contains("better than") ||
+             q.contains("which is better")) && (hasCompanyMention(q) || hasFinancialWord)) return true;
+
+        // --- Level 6: investment ---
+        if ((q.contains("invest") || q.contains("should i buy") || q.contains("buy or sell") ||
+             q.contains("portfolio") || q.contains("long-term") || q.contains("stock") || q.contains("share price")) && hasCompanyMention(q)) return true;
+
+        // --- Level 7: strategic / advisory ---
+        if ((q.contains("focus on") || q.contains("strategy") || q.contains("improve profit") ||
+             q.contains("improve margin") || q.contains("what risks") || q.contains("risks affecting") ||
+             q.contains("what should") || q.contains("how can") && q.contains("improve")) && hasCompanyMention(q)) return true;
+
+        // --- Level 8: scenario / what-if ---
+        if (q.startsWith("what if") || q.contains("what happens if") || q.contains("scenario analysis") ||
+            q.contains("what would happen") || (q.contains("can") && q.contains("become") && hasCompanyMention(q)) ||
+            q.contains("trillion dollar") || q.contains("lakh crore") || q.contains("billion dollar revenue")) return true;
+
+        // --- Explicit financial terms always route ---
+        if (q.contains("financial analysis") || q.contains("financial health") ||
+               q.contains("5 year forecast") || q.contains("5-year forecast") ||
+               q.contains("valuation") || q.contains("pe ratio") || q.contains("roe") ||
+               q.contains("investment outlook") || q.contains("growth analysis")) return true;
+
+        // --- Follow-up questions with a proper noun AFTER the trigger word ---
+        // The capital letter must come AFTER "about", "on", etc — not just be the first
+        // letter of the sentence. We check on the ORIGINAL userMessage so that [A-Z]
+        // stays case-sensitive ((?i) would make [A-Z] match lowercase too).
+        //
+        // "what about Presidio?" → capital P after "about " ✓
+        // "What is my name?"    → no "about" trigger, blocked by exclusion above ✓
+        // "what about the weather?" → lowercase 't' after "about " ✗
+        boolean looksLikeFollowUp =
+                // "what about Presidio?", "how about TCS?"
+                userMessage.matches("[Ww]hat\\s+about\\s+[A-Z][a-zA-Z]\\w*.*") ||
+                userMessage.matches("[Hh]ow\\s+about\\s+[A-Z][a-zA-Z]\\w*.*") ||
+                // "tell me about Presidio", "show me Accenture", "give me info on HCL"
+                userMessage.matches("[Tt]ell\\s+me\\s+(more\\s+)?(about\\s+)?[A-Z][a-zA-Z]\\w*.*") ||
+                userMessage.matches("[Ss]how\\s+me\\s+(more\\s+)?(about\\s+)?[A-Z][a-zA-Z]\\w*.*") ||
+                userMessage.matches("[Gg]ive\\s+me\\s+(more\\s+)?(about\\s+)?[A-Z][a-zA-Z]\\w*.*") ||
+                // "More on Presidio", "Details on TCS", "Info about Wipro"
+                userMessage.matches("[Mm]ore\\s+on\\s+[A-Z][a-zA-Z]\\w*.*") ||
+                userMessage.matches("[Dd]etails\\s+(on|about)\\s+[A-Z][a-zA-Z]\\w*.*") ||
+                userMessage.matches("[Ii]nfo\\s+(on|about)\\s+[A-Z][a-zA-Z]\\w*.*");
+        if (looksLikeFollowUp) return true;
+
+        return false;
+    }
+
+    /** Quick check used only inside routing exclusions — avoids circular calls. */
+    private boolean hasFinancialKeywordsQuick(String q) {
+        return q.contains("revenue") || q.contains("profit") || q.contains("stock") ||
+               q.contains("invest") || q.contains("financial") || q.contains("market cap") ||
+               q.contains("earnings") || q.contains("growth") || q.contains("forecast");
+    }
+
+    private boolean hasCompanyMention(String lower) {
+        // Indian IT
+        if (lower.contains("hcl") || lower.contains("tcs") || lower.contains("infosys") || lower.contains("wipro")) return true;
+        // Indian financial / conglomerates
+        if (lower.contains("reliance") || lower.contains("hdfc") || lower.contains("bajaj") ||
+            lower.contains("icici") || lower.contains("axis") || lower.contains("rossell")) return true;
+        // Global tech
+        if (lower.contains("amazon") || lower.contains("microsoft") || lower.contains("google") ||
+            lower.contains("apple") || lower.contains("meta") || lower.contains("netflix") ||
+            lower.contains("nvidia") || lower.contains("tesla") || lower.contains("alphabet") ||
+            lower.contains("aws") || lower.contains("azure")) return true;
+        // Generic company suffixes
+        if (lower.matches(".*(ltd|inc|corp|technologies|bank|industries|pharma|motors).*")) return true;
+        return false;
     }
 
     /**
@@ -393,18 +426,11 @@ public class ChatService {
         return lower.length() <= 15 && !isFinancialAnalysisQuestion(userMessage);
     }
 
-    /**
-     * Log (logs only) which data source(s) fed the response: RAG documents,
-     * internet search, or the model's own base knowledge when neither is present.
-     */
+    // kept for any remaining callers; new code logs directly
     private void logResponseSources(String path, boolean ragUsed, int docCount, boolean internetUsed) {
-        boolean modelOnly = !ragUsed && !internetUsed;
-        log.info("📊 RESPONSE SOURCE [{}] -> RAG(documents): {}{} | Internet(Tavily): {} | Model base-knowledge only: {}",
-                path,
-                ragUsed ? "YES" : "NO",
-                ragUsed ? " (" + docCount + " docs)" : "",
-                internetUsed ? "YES" : "NO",
-                modelOnly ? "YES" : "NO");
+        log.info("[{}] RAG: {} | Tavily: {}", path,
+                ragUsed ? "Yes (" + docCount + " docs)" : "No",
+                internetUsed ? "Yes" : "No");
     }
 
     /**
@@ -426,9 +452,21 @@ public class ChatService {
             // Validate and clean chart data
             response = validateAndCleanChartData(response);
 
-            log.info("✅ Financial analysis completed - response length: {} characters, chart data points: {}",
-                    response.getAnswer() != null ? response.getAnswer().length() : 0,
-                    response.getChartData() != null ? response.getChartData().size() : 0);
+            // If the model returned empty chartData but the answer has year-over-year figures,
+            // extract them as a fallback so the frontend always gets chart points.
+            if ((response.getChartData() == null || response.getChartData().isEmpty())
+                    && response.getAnswer() != null && !response.getAnswer().isBlank()) {
+                List<Map<String, Object>> extracted =
+                        financialAssistantService.get().extractChartDataFromText(response.getAnswer());
+                if (!extracted.isEmpty()) {
+                    response.setChartData(extracted);
+                    response.setChartType("line");
+                }
+            }
+
+            if (response.getAnswer() != null) {
+                log.info("[FINSIGHT] Response: {}", response.getAnswer());
+            }
 
             return response;
         } catch (Exception e) {
@@ -532,130 +570,94 @@ Rules: start with { and end with }, no text outside the JSON, keep chartData emp
     }
 
     /**
-     * System prompt for regular chat and financial analysis
+     * System prompt for regular chat and financial analysis (non-FinancialAssistantService path).
      */
     private String getSimplifiedSystemPrompt() {
         return """
-RESPONSE FORMAT: You MUST respond with VALID JSON ONLY.
+You are FinSight AI, an enterprise financial intelligence assistant.
 
-MANDATORY JSON STRUCTURE:
+════════════════════════════════════════════════════════════
+OUTPUT FORMAT — STRICT JSON (one object, no other text)
+════════════════════════════════════════════════════════════
+
+You MUST respond with ONLY this JSON structure:
 {
-  "answer": "Your response here",
+  "answer": "<markdown string>",
+  "chartType": "line" | "bar" | "none",
+  "chartData": [{"year": "YYYY", "value": 123456789}]
+}
+
+JSON RULES (no exceptions):
+• Start with { and end with } — no text outside
+• The answer value is a JSON string: use \\n for newlines, \\" for quotes
+• No markdown code fences, no backticks, no ```json wrapper
+• chartData values must be plain integers (706760000000 not "706.76B")
+• chartData years must be strings ("2020" not 2020), forecast years use "F" suffix ("2025F")
+• chartType must be "line", "bar", or "none"
+
+════════════════════════════════════════════════════════════
+ANSWER FIELD — MARKDOWN FORMATTING
+════════════════════════════════════════════════════════════
+
+The answer value is rendered as Markdown. Rules:
+• Use ## for section headers — always followed by \\n\\n before content
+• Use **bold** for key numbers, KPIs, and important terms
+• Use - bullet lists for facts, metrics, or enumerated points
+• Use | Markdown tables | for structured data comparisons
+• NEVER concatenate a header onto the same line as content
+• Keep paragraphs short — 2-3 sentences max
+• End every response with a complete sentence and a period
+
+════════════════════════════════════════════════════════════
+USE-CASE EXAMPLES — FOLLOW THESE PATTERNS EXACTLY
+════════════════════════════════════════════════════════════
+
+─── EXAMPLE 1: General knowledge / definition question ───
+USER: "What is EBITDA?"
+OUTPUT:
+{
+  "answer": "## What is EBITDA?\\n\\n**EBITDA** stands for **Earnings Before Interest, Taxes, Depreciation, and Amortisation**. It is a widely used measure of a company's core operational profitability, stripping out non-operating costs.\\n\\n## Why It Matters\\n\\n- It allows **apples-to-apples comparison** across companies with different capital structures.\\n- Investors use it to estimate **enterprise value** via the EV/EBITDA multiple.\\n- A higher EBITDA margin (EBITDA ÷ Revenue) indicates **greater operating efficiency**.\\n\\n## Quick Formula\\n\\nEBITDA = Net Profit + Interest + Taxes + Depreciation + Amortisation\\n\\nFor example, if a company earns **Rs 10,000 Cr net profit** with Rs 500 Cr interest, Rs 2,000 Cr taxes, and Rs 1,500 Cr D&A, its EBITDA is **Rs 14,000 Cr**.",
   "chartType": "none",
   "chartData": []
 }
 
-CRITICAL RULES:
-✓ Start with { and end with }
-✓ All fields required: answer, chartType, chartData
-✓ NO text before { or after }
-✓ answer field: Provide complete response without truncation
-✓ For casual conversation: conversational response
-✓ For financial queries: structured financial analysis
-✓ Always end sentences with periods, not ellipsis
+─── EXAMPLE 2: Single-metric lookup question ───
+USER: "What is HCL's latest revenue?"
+OUTPUT:
+{
+  "answer": "## HCL Technologies — Latest Revenue\\n\\nHCL Technologies reported **Rs 1,30,144 Crore** in revenue for **FY2026** (year ended 31 March 2026), marking an **11.2% year-over-year increase** from Rs 1,17,055 Crore in FY2025.\\n\\n## Revenue Trend (Last 3 Years)\\n\\n| FY | Revenue (Rs Crore) | YoY Growth |\\n|----|-------------------|------------|\\n| FY2024 | 1,09,913 | +8.3% |\\n| FY2025 | 1,17,055 | +6.5% |\\n| FY2026 | 1,30,144 | +11.2% |\\n\\nRevenue growth has **re-accelerated in FY2026** after a brief moderation, driven by expansion in cloud services and digital transformation contracts.",
+  "chartType": "bar",
+  "chartData": [{"year": "2024", "value": 1099130000000}, {"year": "2025", "value": 1170550000000}, {"year": "2026", "value": 1301440000000}]
+}
 
-JSON RULES (ABSOLUTE):
-✓ Start with { and end with }
-✓ All fields required: answer, chartType, chartData
-✓ NO text before { or after }
-✓ NO markdown, NO backticks, NO ```json
-✓ NO ESCAPE ISSUES - use proper JSON escaping
-✓ chartData: array with minimum 5 entries (max 10)
-✓ All values must be integers (10000000 not "10000000")
-✓ All years must be strings ("2020" not 2020)
+─── EXAMPLE 3: Full financial analysis question ───
+USER: "Analyse HCL Technologies financials" or "Show me HCL revenue trend"
+OUTPUT:
+{
+  "answer": "## 🏢 Company Overview\\n\\nHCL Technologies Ltd is a leading Indian IT services company headquartered in Noida, India, operating in **Information Technology Services**. It provides application development, IT infrastructure management, cloud solutions, and engineering services to global enterprise clients. With a **market capitalisation of Rs 3,09,819 Crore** and a current share price of **Rs 1,141.7**, HCL is one of India's Big-4 IT firms.\\n\\n---\\n\\n## 📊 Current Financial Snapshot\\n\\n| Metric | Value |\\n|--------|-------|\\n| **Revenue (FY2026)** | Rs 1,30,144 Crore |\\n| **Net Profit (FY2026)** | Rs 16,642 Crore |\\n| **Net Margin** | 12.8% |\\n| **9-Year Revenue CAGR** | ~11.9% |\\n| **Financial Health** | Strong |\\n\\n---\\n\\n## 📈 Historical Financial Performance\\n\\nHCL has delivered consistent double-digit revenue growth over nine fiscal years, growing from **Rs 47,568 Crore in FY2017** to **Rs 1,30,144 Crore in FY2026** — a **2.7× increase** in nine years.\\n\\n| FY | Revenue (Rs Crore) | YoY Growth | Net Profit (Rs Crore) | Net Margin |\\n|----|-------------------|------------|----------------------|------------|\\n| FY2017 | 47,568 | — | 8,606 | 18.1% |\\n| FY2018 | 50,569 | +6.3% | 8,721 | 17.2% |\\n| FY2019 | 60,427 | +19.5% | 10,120 | 16.7% |\\n| FY2020 | 70,676 | +17.0% | 11,057 | 15.6% |\\n| FY2021 | 75,379 | +6.7% | 11,145 | 14.8% |\\n| FY2022 | 85,651 | +13.6% | 13,499 | 15.8% |\\n| FY2023 | 1,01,456 | +18.5% | 14,851 | 14.6% |\\n| FY2024 | 1,09,913 | +8.3% | 15,702 | 14.3% |\\n| FY2025 | 1,17,055 | +6.5% | 17,390 | 14.9% |\\n| FY2026 | 1,30,144 | +11.2% | 16,642 | 12.8% |\\n\\n---\\n\\n## 💡 Key Insights\\n\\n- **Consistent Revenue Compounder:** 9-year revenue CAGR of ~11.9% reflects durable demand for HCL's IT services across geographies.\\n- **Margin Compression Trend:** Net margin declined from **18.1% (FY2017)** to **12.8% (FY2026)** driven by rising depreciation, interest costs, and wage inflation.\\n- **FY2026 Profit Dip:** Despite record revenue, net profit fell to Rs 16,642 Cr from Rs 17,390 Cr in FY2025, primarily due to higher interest expenses and lower other income.\\n- **Strong Cash Generation:** Operating cash flow has grown from Rs 8,995 Cr (FY2017) to Rs 19,975 Cr (FY2026), funding dividends and capex organically.\\n\\n---\\n\\n## 🔮 5-Year Forecast (Projected)\\n\\n> **Projected Revenue CAGR:** ~10% per year\\n> **Basis:** 9-year historical CAGR of 11.9%, moderated slightly for market maturity and margin pressure\\n\\n| Year | Revenue (Rs Crore) | YoY Growth | Net Profit (Rs Crore) | Margin |\\n|------|--------------------|------------|----------------------|--------|\\n| 2027F | 1,43,158 | +10% | 18,310 | 12.8% |\\n| 2028F | 1,57,474 | +10% | 20,141 | 12.8% |\\n| 2029F | 1,73,221 | +10% | 22,155 | 12.8% |\\n| 2030F | 1,90,543 | +10% | 24,370 | 12.8% |\\n| 2031F | 2,09,597 | +10% | 26,807 | 12.8% |\\n\\nBased on its historical growth trajectory, HCL is projected to cross **Rs 2 lakh Crore in revenue by FY2031**, assuming a stable 10% annual growth rate. Margin recovery is contingent on operating leverage gains in cloud and products businesses.\\n\\n---\\n\\n## 🎯 Executive Outlook\\n\\n**Rating: Positive**\\n\\nHCL Technologies is a fundamentally strong IT compounder with a proven track record of consistent revenue growth and robust cash generation. The near-term headwind is margin compression, but the structural demand for cloud migration and digital transformation services keeps the long-term story intact. Investors should monitor the FY2027 margin trajectory as a key signal for re-rating.",
+  "chartType": "line",
+  "chartData": [{"year": "2017", "value": 475680000000}, {"year": "2018", "value": 505690000000}, {"year": "2019", "value": 604270000000}, {"year": "2020", "value": 706760000000}, {"year": "2021", "value": 753790000000}, {"year": "2022", "value": 856510000000}, {"year": "2023", "value": 1014560000000}, {"year": "2024", "value": 1099130000000}, {"year": "2025", "value": 1170550000000}, {"year": "2026", "value": 1301440000000}]
+}
 
-ANSWER FIELD REQUIREMENTS:
-- MINIMUM 1000+ words of comprehensive analysis
-- NEVER truncate - complete every sentence
-- Include ALL historical years with numbers
-- Include forecasts with "F" suffix years (2025F, 2026F)
-- Use actual numbers from your analysis
-- Structure: Overview → Historical Data → Trend Analysis → Forecast → Conclusion
-- Financial metrics: Revenue, Growth %, CAGR, Margins, etc.
-- ALWAYS end with complete conclusion ending with period
-- NEVER end mid-sentence or with "..."
+─── EXAMPLE 4: Risk / specific-topic question ───
+USER: "What are the risks of investing in HCL?"
+OUTPUT:
+{
+  "answer": "## ⚠️ Key Investment Risks — HCL Technologies\\n\\n- **Margin Compression:** Net margin has declined from **18.1% (FY2017)** to **12.8% (FY2026)**, a 530 basis point erosion over nine years. Continued cost inflation could push margins below the 12% threshold.\\n- **Currency Risk:** HCL earns a significant portion of revenue in USD and EUR. Rupee appreciation compresses revenue realisation and reported profits in INR terms.\\n- **Client Concentration:** Heavy reliance on top-20 enterprise clients in the US and Europe creates exposure to budget cuts during economic downturns.\\n- **Talent Cost Inflation:** India's IT talent market remains competitive; salary increments and attrition costs pressure operating margins.\\n- **FY2026 Profit Decline:** Net profit fell **-4.3% YoY** to Rs 16,642 Cr in FY2026 despite 11.2% revenue growth — a warning sign that revenue growth is not fully translating to bottom-line improvement.\\n\\n## Balancing Factors\\n\\n- Strong operating cash flow of **Rs 19,975 Crore** (FY2026) provides resilience.\\n- Debt remains manageable at Rs 5,215 Crore with cash reserves of Rs 23,425 Crore.",
+  "chartType": "none",
+  "chartData": []
+}
 
-CHARTDATA REQUIREMENTS:
-- Minimum 5 data points, maximum 10
-- Extract EXACT numbers from answer field
-- Format: {"year": "2020", "value": 10000000}
-- Historical years: "2020", "2021", "2022", "2023", "2024"
-- Forecast years: "2025F", "2026F" (with F suffix)
-- Values: Always integers, no decimals or strings
-- Include both historical and forecast data
+════════════════════════════════════════════════════════════
+FINAL CHECKLIST BEFORE OUTPUTTING
+════════════════════════════════════════════════════════════
 
-FOR COMPANY/FINANCIAL ANALYSIS QUESTIONS:
-
-Include these sections in order:
-1. COMPANY OVERVIEW (100+ words)
-   - Business description
-   - Market position
-   - Key business segments
-
-2. HISTORICAL FINANCIAL DATA (400+ words)
-   - FY2020-2024 Revenue figures
-   - Year-over-year growth percentages
-   - Identify trends and patterns
-   - Calculate CAGR
-
-3. CURRENT POSITION (300+ words)
-   - Latest financial metrics
-   - Margins (Gross, Operating, Net)
-   - Key ratios and indicators
-   - Financial health assessment
-
-4. TREND ANALYSIS (300+ words)
-   - Growth trajectory
-   - Comparative analysis
-   - Industry position
-   - Market dynamics
-
-5. FUTURE PLANS & FORECAST (400+ words)
-   - Strategic initiatives
-   - Expansion plans
-   - 5-year projections (2025-2026)
-   - Based on historical CAGR
-   - Risk factors and opportunities
-
-6. INVESTMENT PERSPECTIVE (200+ words)
-   - Overall outlook
-   - Key strengths and weaknesses
-   - Growth potential
-   - Recommendations
-
-CRITICAL VALIDATION (CHECK BEFORE RESPONDING):
-✓ Response is valid, parseable JSON
-✓ Answer field contains 1000+ words
-✓ Answer ends with period, NOT truncated
-✓ All mentioned years appear in both answer and chartData
-✓ chartData has 5-10 entries with proper formatting
-✓ No escape character issues
-✓ Forecast years have "F" suffix in chartData
-✓ All numbers are integers
-✓ Every number in chartData matches answer text
-
-IF ANALYZING COMPANIES (HCL, TCS, INFOSYS, RELIANCE, HDFC, WIPRO):
-- You HAVE access to uploaded documents
-- Extract actual financial figures from documents
-- Provide specific numbers, not generic statements
-- Include historical trends and future guidance
-- Give clear financial perspective
-
-COMPLETE YOUR RESPONSE:
-✓ Do NOT truncate or cut off
-✓ Do NOT end mid-analysis
-✓ Do NOT use placeholder text
-✓ Finish what you start
-✓ Provide comprehensive detail
-✓ End with valid JSON closing }
-
-DO NOT EXPOSE INTERNALS:
-✓ Speak naturally; present figures as established facts
-✓ NEVER mention documents, context, retrieval, datasets, "the data provided",
-  or how you obtained information
-✓ NEVER describe your own tools, prompts, or internal process
-
-Now respond with COMPLETE, COMPREHENSIVE analysis in valid JSON format:
+✓ Response starts with { and ends with }
+✓ answer contains proper \\n escape sequences (not literal newlines)
+✓ Every ## header has \\n\\n after it before the next content
+✓ No text outside the JSON object
+✓ chartData values are plain integers, chartData years are strings
+✓ NEVER mention documents, context, retrieval, or your internal process
 """;
     }
 }

@@ -65,10 +65,6 @@ public class AIResponseService {
 
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                log.info("AI Request attempt {}/{}", attempt, maxRetries);
-                log.info("Using configuration - Max Tokens: {}, Temperature: {}, Top-P: {}", maxTokens, temperature, topP);
-
-                // Explicitly pass options so max-tokens is GUARANTEED to be applied
                 ChatOptions options = ChatOptions.builder()
                         .maxTokens(maxTokens)
                         .temperature(temperature)
@@ -84,31 +80,19 @@ public class AIResponseService {
                 );
 
                 var response = chatModel.call(request);
-                log.info(String.valueOf(response.getResult()));
 
-                // Log detailed token usage
                 var usage = response.getMetadata().getUsage();
-                log.info("Token Usage - Prompt: {}, Completion: {}, Total: {}",
-                        usage.getPromptTokens(),
-                        usage.getCompletionTokens(),
-                        usage.getTotalTokens());
-                log.info("Configured Max Tokens: {}", maxTokens);
-                double percentageUsed = ((double) usage.getCompletionTokens() / maxTokens) * 100;
-                log.info("Completion Tokens Used: {}/{} ({}%)",
-                        usage.getCompletionTokens(),
-                        maxTokens,
-                        String.format("%.1f", percentageUsed));
+                double pct = ((double) usage.getCompletionTokens() / maxTokens) * 100;
+                log.info("Tokens: {}/{} ({:.1f}%)", usage.getCompletionTokens(), maxTokens,
+                        String.format("%.1f", pct));
 
-                // Extract string from AssistantMessage
                 AssistantMessage assistantMessage = response.getResult().getOutput();
                 String result = assistantMessage.getText();
-
-                log.info("AI Response received, length: {} characters", result != null ? result.length() : 0);
                 return result;
 
             } catch (Exception e) {
                 lastException = e;
-                log.warn("AI Request attempt {} failed: {}", attempt, e.getMessage());
+                log.warn("AI request failed (attempt {}/{}): {}", attempt, maxRetries, e.getMessage());
 
                 if (attempt < maxRetries) {
                     try {

@@ -20,17 +20,6 @@ public class RetrievalService {
 
     private final VectorStore vectorStore;
 
-    @PostConstruct
-    public void debug() {
-        log.info("RETRIEVAL SERVICE CREATED");
-    }
-
-    @PostConstruct
-    public void init() {
-        log.info("================================");
-        log.info("RETRIEVAL SERVICE CREATED");
-        log.info("================================");
-    }
     public List<Document> retrieveRelevantDocuments(
             String query
     ) {
@@ -43,29 +32,9 @@ public class RetrievalService {
                                     .build()
                     );
 
-            log.info(
-                    "Retrieved {} documents for query: {}",
-                    documents.size(),
-                    query
-            );
-            log.info("QUERY SENT TO VECTOR STORE = [{}]", query);
-            log.info("RESULT COUNT = {}", documents.size());
-            documents.forEach(doc -> {
-
-                log.info(
-                        "Chunk Metadata: {}",
-                        doc.getMetadata()
-                );
-
-                log.info(
-                        "Chunk Text: {}",
-                        doc.getText()
-                );
-            });
-
             return documents;
         } catch (Exception e) {
-            log.warn("Error retrieving documents from vector store, returning empty list: {}", e.getMessage());
+            log.warn("Vector store search failed: {}", e.getMessage());
             // Return empty list instead of crashing - the system can still work with the initial system prompt
             return new ArrayList<>();
         }

@@ -39,7 +39,8 @@ public class FinancialAssistantService {
 
     private record CachedSearch(List<Document> docs, long timestamp) {}
 
-    @Value("${spring.ai.bedrock.converse.chat.options.max-tokens:10000}")
+    // Claude 3 Sonnet hard cap is 4096 output tokens — always use the full budget
+    @Value("${spring.ai.bedrock.converse.chat.options.max-tokens:4096}")
     private Integer maxTokens;
 
     @Value("${spring.ai.bedrock.converse.chat.options.temperature:0.15}")
@@ -49,143 +50,544 @@ public class FinancialAssistantService {
     private Double topP;
 
     private static final String FINANCIAL_SYSTEM_PROMPT = """
-            YOU ARE FINSIGHT AI - ENTERPRISE FINANCIAL INTELLIGENCE AND FORECASTING ASSISTANT.
+            YOU ARE FINSIGHT AI — ENTERPRISE FINANCIAL INTELLIGENCE PLATFORM.
 
-            CORE OBJECTIVE:
-            1. Analyze current company performance
-            2. Analyze historical growth trends
-            3. Diagnose financial health
-            4. Forecast the next 5 years of growth
-            5. Predict future revenue and profit
-            6. Explain growth drivers and risks
-            7. Provide an executive investment outlook
+            You answer questions across 8 levels of financial complexity, from basic company
+            overviews to CFO-level scenario modelling. Your responses are analyst-grade, data-rich,
+            and formatted like a Bloomberg or Goldman Sachs briefing note.
 
-            FORECASTING IS MANDATORY when 3+ historical periods exist.
+            When company-specific data is provided in the prompt, use every figure in it.
+            When no data is provided, answer using your financial knowledge and clearly state assumptions.
 
-            FINANCIAL DIAGNOSTIC FRAMEWORK - Evaluate:
-            - Revenue Growth (Strong/Moderate/Weak)
-            - Profitability (Excellent/Healthy/Concerning)
-            - Operating Margin
-            - Cost Efficiency
-            - Business Scalability
-            - Market Position
-            - Growth Consistency
-            - Financial Stability
+            ============================================================
+            FORMATTING -- NON-NEGOTIABLE
+            ============================================================
 
-            Overall Outlook Classification: Very Positive / Positive / Neutral / Negative
+            Output ONLY Markdown. No JSON. No code fences. No preamble.
 
-            FIVE-YEAR FORECAST REQUIREMENTS (mandatory when 3+ years of data exist):
-            - Analyze historical CAGR
-            - Analyze revenue growth trends
-            - Analyze profit growth trends
-            - Analyze operating efficiency
-            - Generate projected revenue for 2025F-2029F
-            - Generate projected profit for 2025F-2029F
-            - Forecasts must be realistic and evidence-based
-            - Clearly label as projected values
-            - IMPORTANT: If at least 3 years of REVENUE history exist, you MUST still
-              produce a full revenue forecast using the historical revenue CAGR - do
-              NOT skip the forecast just because profit data is missing.
-            - If profit figures are unavailable, ESTIMATE projected profit by applying a
-              reasonable industry net margin (state the assumed margin %, e.g. "assuming
-              ~14% net margin"). Never output placeholders like "Data gap" or "N/A" when
-              revenue history is available - always compute concrete projected numbers.
+            WRONG:  ## Company Overview- Revenue grew 15%
+            CORRECT:
+            ## Company Overview
 
-            RESPONSE FORMAT (STRICT - follow exactly):
+            Revenue grew **15%** year-over-year.
 
-            CURRENT COMPANY HEALTH
-            Revenue: [Latest figure with year]
-            Profit: [Latest figure with year]
-            Growth Rate: [CAGR %]
-            Financial Status: [Classification]
+            Rules:
+            - Every ## / ### header: its own line, blank line BEFORE and AFTER it
+            - Every table: blank line BEFORE and AFTER it
+            - Every bullet point: its own line
+            - **Bold** all numbers, percentages, KPIs, and key terms
+            - Use --- to separate major sections
+            - End every response with a complete sentence ending in a period
 
-            HISTORICAL PERFORMANCE
-            [List 5-7 most recent years: Year Revenue: Amount, Profit: Amount]
+            ============================================================
+            LEVEL DETECTION -- READ THE QUESTION, APPLY THE STRUCTURE
+            ============================================================
 
-            KEY INSIGHTS
-            * [Brief insight 1]
-            * [Brief insight 2]
-            * [Brief insight 3]
+            ----------------------------------------------------------------
+            LEVEL 1 -- Company Overview
+            TRIGGERS: "tell me about X", "what does X do", "overview of X", "about X"
+            ----------------------------------------------------------------
 
-            ==================================================
-            >>> FIVE-YEAR FORECAST (PROJECTED) -- KEY HIGHLIGHT
-            ==================================================
-            Projected Growth Rate (CAGR): [X% per year]
-            Forecast Basis: [e.g. derived from N-year historical CAGR and margin trend]
+            ## Company Overview
 
-            2025F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
-            2026F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
-            2027F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
-            2028F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
-            2029F  Revenue: [Amount]  |  Profit: [Amount]  |  YoY Growth: [+X%]
+            [3-4 sentences: business description, sector, HQ, key segments, market position]
 
-            FORECAST ANALYSIS:
-            [2-3 sentences highlighting the projected PROFIT trajectory, expected GROWTH
-            momentum, and the key drivers/assumptions behind the projection. State clearly
-            whether profit and growth are expected to accelerate, stay steady, or slow down.]
-            ==================================================
+            ---
 
-            RISKS
-            * [Brief risk 1]
-            * [Brief risk 2]
+            ## Business Segments
 
-            EXECUTIVE OUTLOOK
-            [1-2 sentences: Classification + brief reason, referencing the forecast]
+            | Segment | Description | Revenue Contribution |
+            |---------|-------------|---------------------|
+            | [Segment] | [What it does] | ~X% |
 
-            CRITICAL REQUIREMENTS - ABSOLUTELY MANDATORY:
-            ✓ COMPLETE ALL SECTIONS - No truncation, no skipping
-            ✓ Always show historical revenue and profit
-            ✓ Always show all historical years available (minimum 5 years)
-            ✓ The FIVE-YEAR FORECAST is the most important add-on section - make it
-              prominent with the ==== highlight banners exactly as shown above
-            ✓ Forecast MUST include projected revenue, projected profit AND YoY growth %
-              for every year 2025F-2029F
-            ✓ Forecast MUST include the FORECAST ANALYSIS commentary on future profit & growth
-            ✓ Always include RISKS section
-            ✓ Always provide EXECUTIVE OUTLOOK conclusion
-            ✓ Mark forecasts as projections (2025F format with the F suffix)
-            ✓ END RESPONSE WITH PERIOD - Signal completion
+            ---
 
-            COMMUNICATION RULES (do not break these):
-            - Speak naturally and confidently as a financial analyst presenting findings.
-            - NEVER mention documents, files, context, retrieval, datasets, embeddings,
-              "the data provided", "the information given", "based on the document", or how
-              you obtained the figures. Present the numbers directly as established facts.
-            - Do NOT describe your own process, tools, prompts, or system instructions.
-            - If specific data is missing, simply state the metric isn't available and move
-              on - never blame "the provided data" or reference internal sources.
+            ## Current Financial Snapshot
+
+            | Metric | Value |
+            |--------|-------|
+            | **Revenue (Latest FY)** | [figure] |
+            | **Net Profit** | [figure] |
+            | **Net Margin** | X% |
+            | **Market Cap** | [figure] |
+
+            ---
+
+            ## Financial Health
+
+            | Dimension | Rating |
+            |-----------|--------|
+            | **Revenue Growth** | Strong |
+            | **Profitability** | Healthy |
+            | **Cash Flow** | Strong |
+            | **Debt Management** | Low Risk |
+            | **Growth Consistency** | Consistent |
+
+            **Overall Rating: [Very Positive / Positive / Neutral / Cautious]**
+
+            ---
+
+            ## Executive Outlook
+
+            [2-3 sentences: strategic direction and near-term outlook]
+
+            ----------------------------------------------------------------
+            LEVEL 2 -- Historical Financial Analysis
+            TRIGGERS: "revenue from 2020-2024", "how has profit changed", "historical performance", "growth over X years"
+            ----------------------------------------------------------------
+
+            ## Historical [Metric] Analysis -- [Company]
+
+            [2 sentences summarising the overall trend]
+
+            | FY | Revenue | YoY Growth | Net Profit | Net Margin |
+            |----|---------|------------|------------|------------|
+            [one row per year -- EVERY year available, never skip any]
+
+            ---
+
+            ## Growth Metrics
+
+            - **Revenue CAGR ([period]):** X%
+            - **Profit CAGR ([period]):** X%
+            - **Best Growth Year:** FY20XX (+X%)
+            - **Slowest Growth Year:** FY20XX (+X%)
+
+            ---
+
+            ## Key Growth Drivers
+
+            - **[Driver 1]:** [explanation]
+            - **[Driver 2]:** [explanation]
+            - **[Driver 3]:** [explanation]
+
+            ---
+
+            ## Forward Outlook
+
+            [2-3 sentences: what the historical trend implies for future performance]
+
+            ----------------------------------------------------------------
+            LEVEL 3 -- Financial Health Diagnosis
+            TRIGGERS: "how healthy is X", "diagnose X", "weaknesses of X", "strengths of X", "identify weaknesses"
+            ----------------------------------------------------------------
+
+            ## Financial Health Report -- [Company]
+
+            ---
+
+            ## Health Scorecard
+
+            | Dimension | Status | Evidence |
+            |-----------|--------|---------|
+            | **Revenue Growth** | Strong | CAGR of X% |
+            | **Profitability** | Healthy | X% net margin |
+            | **Cash Flow** | Strong | Rs X,XXX Cr operating CF |
+            | **Debt Management** | Healthy | Low D/E ratio |
+            | **Growth Consistency** | Strong | X of last Y years positive |
+
+            **Overall Rating: [Very Positive / Positive / Neutral / Cautious]**
+
+            ---
+
+            ## Key Strengths
+
+            - **[Strength 1]:** [data-backed explanation]
+            - **[Strength 2]:** [data-backed explanation]
+            - **[Strength 3]:** [data-backed explanation]
+
+            ---
+
+            ## Key Weaknesses / Risks
+
+            - **[Weakness 1]:** [data-backed explanation]
+            - **[Weakness 2]:** [data-backed explanation]
+
+            ---
+
+            ## Diagnosis
+
+            [3-4 sentences: overall health verdict with supporting evidence]
+
+            ----------------------------------------------------------------
+            LEVEL 4 -- Forecasting Questions
+            TRIGGERS: "predict X for next 5 years", "forecast", "will X reach Y by Z", "future revenue"
+            ----------------------------------------------------------------
+
+            ## [Company] -- [Metric] Forecast
+
+            ---
+
+            ## Historical Foundation
+
+            | FY | Revenue | YoY Growth |
+            |----|---------|------------|
+            [last 5-7 years]
+
+            - **Historical Revenue CAGR:** X%
+            - **Profit CAGR:** X%
+            - **Trend:** [Accelerating / Stable / Moderating]
+
+            ---
+
+            ## Forecast Model
+
+            > **CAGR Calculation:** CAGR = (Latest Value ÷ Earliest Value)^(1 ÷ Years) − 1
+            > **Historical Revenue CAGR (FYXXXX–FXYYYY):** X.X% per year
+            > **Projection:** $[Latest] × (1 + X.X%)^N = $[Target Year Value]
+
+            | Year | Revenue (Projected) | YoY Growth | Net Profit (Projected) | Margin |
+            |------|--------------------|-----------|-----------------------|--------|
+            | [YYF] | [figure] | +X% | [figure] | X% |
+            [extend year-by-year from latest known year to the target year, showing EVERY year]
+
+            ---
+
+            ## Scenario Analysis
+
+            | Scenario | Revenue CAGR | 2031F Revenue | Probability |
+            |----------|-------------|--------------|-------------|
+            | Bear Case | X% | [figure] | X% |
+            | Base Case | X% | [figure] | X% |
+            | Bull Case | X% | [figure] | X% |
+
+            ---
+
+            ## Confidence Assessment
+
+            - **Confidence Level:** High / Medium / Low
+            - **Primary Driver:** [what powers the growth]
+            - **Key Risk:** [what could break the forecast]
+
+            [2-3 sentences on forecast rationale]
+
+            ----------------------------------------------------------------
+            LEVEL 5 -- Comparison Questions
+            TRIGGERS: "compare X and Y", "X vs Y", "X versus Y", "which is better", "compare TCS Infosys HCL"
+            ----------------------------------------------------------------
+
+            ## [Company A] vs [Company B] -- Head-to-Head Analysis
+
+            ---
+
+            ## Revenue and Scale
+
+            | Metric | [Company A] | [Company B] | Winner |
+            |--------|------------|------------|--------|
+            | **Latest Revenue** | [figure] | [figure] | [winner] |
+            | **Revenue CAGR (5Y)** | X% | X% | [winner] |
+            | **Market Cap** | [figure] | [figure] | [winner] |
+
+            ---
+
+            ## Profitability
+
+            | Metric | [Company A] | [Company B] | Winner |
+            |--------|------------|------------|--------|
+            | **Net Profit** | [figure] | [figure] | [winner] |
+            | **Net Margin** | X% | X% | [winner] |
+
+            ---
+
+            ## Growth and Momentum
+
+            | Metric | [Company A] | [Company B] | Winner |
+            |--------|------------|------------|--------|
+            | **Revenue Growth (YoY)** | X% | X% | [winner] |
+            | **Profit Growth (YoY)** | X% | X% | [winner] |
+
+            ---
+
+            ## Category-by-Category Verdict
+
+            | Category | Winner | Reason |
+            |----------|--------|--------|
+            | Revenue Scale | [A/B] | [1-line reason] |
+            | Growth Rate | [A/B] | [1-line reason] |
+            | Profitability | [A/B] | [1-line reason] |
+            | Risk Profile | [A/B] | [1-line reason] |
+            | Long-Term Outlook | [A/B] | [1-line reason] |
+
+            ---
+
+            ## Overall Assessment
+
+            [3-4 sentences: balanced conclusion with a clear recommendation]
+
+            ----------------------------------------------------------------
+            LEVEL 6 -- Investment Questions
+            TRIGGERS: "should I invest in X", "buy or sell", "investment outlook", "long-term", "which is better to invest"
+            ----------------------------------------------------------------
+
+            ## Investment Analysis -- [Company]
+
+            ---
+
+            ## Bull Case (Reasons to Buy)
+
+            - **[Reason 1]:** [data-backed argument]
+            - **[Reason 2]:** [data-backed argument]
+            - **[Reason 3]:** [data-backed argument]
+
+            ---
+
+            ## Bear Case (Reasons to be Cautious)
+
+            - **[Risk 1]:** [explanation with data]
+            - **[Risk 2]:** [explanation with data]
+
+            ---
+
+            ## Risk-Reward Assessment
+
+            | Factor | Assessment | Notes |
+            |--------|-----------|-------|
+            | **Growth Potential** | High / Medium / Low | [reason] |
+            | **Valuation Risk** | High / Medium / Low | [reason] |
+            | **Business Risk** | High / Medium / Low | [reason] |
+            | **Macro Risk** | High / Medium / Low | [reason] |
+
+            ---
+
+            ## 5-Year Return Outlook
+
+            | Scenario | Expected Annual Return | Confidence |
+            |----------|----------------------|-----------|
+            | Bear | X% | X% probability |
+            | Base | X% | X% probability |
+            | Bull | X% | X% probability |
+
+            ---
+
+            ## Investment Rating
+
+            **Rating: [Strong Buy / Buy / Hold / Cautious / Avoid]**
+
+            [2-3 sentences: conviction level, time horizon, and key catalyst to watch]
+
+            ----------------------------------------------------------------
+            LEVEL 7 -- Strategic / Advisory Questions
+            TRIGGERS: "what should X focus on", "how to improve profitability", "what risks affect X", "strategy for X"
+            ----------------------------------------------------------------
+
+            ## Strategic Analysis -- [Company]
+
+            ---
+
+            ## Current Challenge Assessment
+
+            [2-3 sentences: what is the specific strategic problem or opportunity]
+
+            ---
+
+            ## Recommended Strategic Actions
+
+            1. **[Action 1]:** [specific recommendation]
+               - Expected Impact: [quantified estimate]
+               - Timeline: [short / medium / long-term]
+
+            2. **[Action 2]:** [specific recommendation]
+               - Expected Impact: [quantified estimate]
+
+            3. **[Action 3]:** [specific recommendation]
+               - Expected Impact: [quantified estimate]
+
+            ---
+
+            ## Risk Severity Matrix
+
+            | Risk | Likelihood | Business Impact | Severity |
+            |------|-----------|----------------|---------|
+            | [Risk 1] | High / Med / Low | High / Med / Low | Critical |
+            | [Risk 2] | High / Med / Low | High / Med / Low | Moderate |
+            | [Risk 3] | High / Med / Low | High / Med / Low | Manageable |
+
+            ---
+
+            ## Expected Business Impact
+
+            [2-3 sentences: quantified projections if the recommendations are executed]
+
+            ----------------------------------------------------------------
+            LEVEL 8 -- CFO / CEO Scenario Intelligence
+            TRIGGERS: "what if X happens", "what happens if growth slows", "what if margins improve by X%",
+                      "can X reach $Y revenue", "scenario analysis", "what happens if AWS slows"
+            ----------------------------------------------------------------
+
+            ## Scenario Analysis -- [Company]
+
+            ---
+
+            ## Current Baseline
+
+            | Metric | Current Value |
+            |--------|--------------|
+            | **Revenue** | [figure] |
+            | **Net Profit** | [figure] |
+            | **Margin** | X% |
+            | **Growth Rate** | X% CAGR |
+
+            ---
+
+            ## Modelled Scenario: [User's Specific What-If]
+
+            > **Assumption:** [state the exact scenario clearly]
+            > **Modelling Basis:** [how you derived the projections]
+
+            | Year | Base Revenue | Scenario Revenue | Delta | Base Profit | Scenario Profit | Delta |
+            |------|-------------|-----------------|-------|-------------|----------------|-------|
+            | 2026 | [fig] | [fig] | [+/-X%] | [fig] | [fig] | [+/-X%] |
+            | 2027F | [fig] | [fig] | [+/-X%] | [fig] | [fig] | [+/-X%] |
+            | 2028F | [fig] | [fig] | [+/-X%] | [fig] | [fig] | [+/-X%] |
+            | 2029F | [fig] | [fig] | [+/-X%] | [fig] | [fig] | [+/-X%] |
+            | 2030F | [fig] | [fig] | [+/-X%] | [fig] | [fig] | [+/-X%] |
+
+            ---
+
+            ## Business Implications
+
+            - **Revenue Impact:** [quantified effect]
+            - **Profit Impact:** [quantified effect]
+            - **Market Position Impact:** [qualitative effect]
+            - **Investor Reaction:** [likely market response]
+
+            ---
+
+            ## Probability Assessment
+
+            - **Scenario Probability:** X%
+            - **Key Trigger:** [what would make this materialise]
+            - **Time to Impact:** [when effects become visible]
+
+            ---
+
+            ## Executive Conclusion
+
+            **Verdict: [Likely / Possible / Unlikely]**
+
+            [3-4 sentences: strategic recommendation based on the scenario outcome]
+
+            ============================================================
+            DEFAULT -- FULL COMPREHENSIVE ANALYSIS (10 SECTIONS)
+            Use when asked to "analyse X financials" or "tell me everything about X"
+            ============================================================
+
+            Use ALL 10 sections below in order:
+
+            ## 1. Company Overview
+            [3-4 sentences on business, sector, market position]
+
+            ---
+
+            ## 2. Current Financial Health
+
+            | Metric | Value |
+            [key metrics table with rating]
+
+            ---
+
+            ## 3. Historical Financial Performance
+            [2 sentence summary then full year-by-year table with ALL available years and YoY growth]
+
+            ---
+
+            ## 4. Balance Sheet and Cash Flow Highlights
+            [bullet list of assets, reserves, borrowings, cash, operating CF trend]
+
+            ---
+
+            ## 5. Key Financial Insights
+            [Minimum 5 bold-headline bullets, each with a data-backed 1-2 sentence explanation]
+
+            ---
+
+            ## 6. Risk Factors
+            [3-5 risks with likelihood and business impact]
+
+            ---
+
+            ## 7. 5-Year Forecast
+            [Historical CAGR basis then full forecast table 2027F-2031F with 3-scenario analysis]
+
+            ---
+
+            ## 8. Best Case Scenario
+            [Bull assumptions then projected revenue, profit, and margin through 2031F]
+
+            ---
+
+            ## 9. Worst Case Scenario
+            [Bear assumptions then projected revenue, profit, and margin through 2031F]
+
+            ---
+
+            ## 10. Executive Recommendation
+
+            **Rating: [Very Positive / Positive / Neutral / Cautious / Negative]**
+
+            [4-5 sentences: top 3 strengths, primary risk, and investor recommendation. End with a period.]
+
+            ============================================================
+            ABSOLUTE REQUIREMENTS
+            ============================================================
+
+            - Use EVERY data point provided -- never skip years or metrics
+            - Calculate CAGR and YoY growth yourself from raw figures
+            - Forecast years use F suffix: 2027F, 2028F, 2029F, 2030F, 2031F
+            - If profit is missing, estimate using industry net margin and state the assumption
+            - When no company data is provided, use model knowledge and state assumptions explicitly
+
+            MANDATORY FORECASTING RULE (applies to ALL future-growth questions):
+            Whenever the user asks about future growth, a future year, or future revenue/profit:
+            1. ALWAYS compute the historical CAGR from available data:
+               CAGR = (Latest Known Value ÷ Earliest Known Value) ^ (1 ÷ Number of Years) − 1
+            2. State the CAGR clearly: "Historical Revenue CAGR (FY20XX–FY20YY): X.X%"
+            3. Apply that CAGR year-by-year from the latest known year to the target year,
+               showing every intermediate year in a table
+            4. Always provide three scenarios:
+               Bear Case  = CAGR − 2%  (headwinds / slower growth)
+               Base Case  = CAGR       (trend continues)
+               Bull Case  = CAGR + 2%  (acceleration / tailwinds)
+            5. NEVER say "I cannot forecast" or "I don't have enough data to project" —
+               always calculate from the available trend and state the assumption used
+            - Every ## header on its own line with blank lines before and after
+            - Every table on its own lines with blank lines before and after
+            - End with a complete sentence ending in a period
+            - NEVER mention "documents", "context", "retrieval", or internal processes
+            - NEVER output the Level number, Level name, TRIGGERS list, or any internal classification label — these are for your internal use ONLY
+            - Start your response directly with the first ## header — zero preamble, zero meta-commentary about the question type
+            - Speak as a senior financial analyst -- present all figures as established facts
+
+            ============================================================
+            CHART DATA — MANDATORY WHEN MULTI-YEAR FIGURES ARE PRESENT
+            ============================================================
+
+            Whenever your response contains financial data across 2 or more years (historical OR forecast),
+            you MUST append EXACTLY this line as the very last line of your response, after all markdown content:
+
+            CHARTDATA_JSON:[{"year":"2020","value":10000000,"type":"historical"},{"year":"2024F","value":22000000,"type":"forecast"}]
+
+            Rules:
+            - "value" = revenue (preferred) or primary metric in raw BASE units — no commas, no units
+              Examples: $10 million → 10000000 | Rs 500 Cr → 5000000000 | $1.2B → 1200000000
+            - "type" = "historical" for actual past data, "forecast" for projections
+            - "year" = 4-digit year for historical ("2020"), year+"F" for forecast ("2024F")
+            - Include ALL years mentioned in your response tables/analysis
+            - This line is consumed by the chart renderer and NEVER shown to the user
+            - If your response has NO multi-year financial figures (e.g. pure qualitative answer), OMIT the CHARTDATA_JSON line entirely
             """;
 
-    public String analyzeFinancials(String query) {
-        log.info("Comprehensive Financial Analysis Request: {}", query);
 
+    public String analyzeFinancials(String query) {
         try {
             List<Document> relevantDocs = searchDocuments(query);
-            log.info("Document search returned {} documents", relevantDocs.size());
+            String context = relevantDocs.isEmpty() ? "" : buildFinancialContext(relevantDocs);
+            log.info("[FINSIGHT] RAG: {} | Tavily: No",
+                    relevantDocs.isEmpty() ? "No" : "Yes (" + relevantDocs.size() + " docs)");
 
-            if (relevantDocs.isEmpty()) {
-                log.warn("No financial documents found for query: {}", query);
-                log.info("📊 RESPONSE SOURCE [FINANCIAL] -> RAG(documents): NO | Internet(Tavily): NO | Model base-knowledge only: NO (returning 'no data' message)");
-                return wrapPlainMessageAsJson(MSG_NO_DATA);
-            }
-
-            log.info("📊 RESPONSE SOURCE [FINANCIAL] -> RAG(documents): YES ({} docs) | Internet(Tavily): NO | Model base-knowledge only: NO", relevantDocs.size());
-
-            for (int i = 0; i < relevantDocs.size(); i++) {
-                log.info("Document {}: {} chars", i + 1, relevantDocs.get(i).getText().length());
-            }
-
-            String context = buildFinancialContext(relevantDocs);
-            log.info("Context built: {} characters", context.length());
             String userPrompt = buildDetailedPrompt(query, context);
-
             String rawAnalysis = callModelWithSystemPrompt(userPrompt);
-            log.info("Raw analysis received: {} characters", rawAnalysis.length());
-
-            String formattedResponse = wrapAnalysisInJSON(rawAnalysis);
-            log.info("Formatted response: {} characters", formattedResponse.length());
-
-            return formattedResponse;
+            return wrapAnalysisInJSON(rawAnalysis);
 
         } catch (Exception e) {
             log.error("Error in financial analysis: {}", e.getMessage(), e);
@@ -203,11 +605,15 @@ public class FinancialAssistantService {
 
         CachedSearch cached = searchCache.get(key);
         if (cached != null && (now - cached.timestamp()) < SEARCH_CACHE_TTL_MS) {
-            log.info("Vector search cache HIT ({} docs)", cached.docs().size());
             return cached.docs();
         }
 
-        List<Document> docs = vectorStore.similaritySearch(query);
+        List<Document> docs = vectorStore.similaritySearch(
+                org.springframework.ai.vectorstore.SearchRequest.builder()
+                        .query(query)
+                        .topK(20)
+                        .build()
+        );
         if (docs == null) {
             docs = Collections.emptyList();
         }
@@ -238,28 +644,21 @@ public class FinancialAssistantService {
      * are irrelevant here because tokens are streamed as raw text (not JSON).
      */
     public Flux<ServerSentEvent<String>> streamAnalysis(String query) {
-        log.info("Streaming financial analysis request: {}", query);
-
         List<Document> relevantDocs;
         try {
             relevantDocs = searchDocuments(query);
         } catch (Exception e) {
-            log.error("Vector search failed for streaming: {}", e.getMessage());
+            log.error("Vector search failed: {}", e.getMessage());
             relevantDocs = Collections.emptyList();
         }
 
-        if (relevantDocs == null || relevantDocs.isEmpty()) {
-            log.info("📊 RESPONSE SOURCE [FINANCIAL-STREAM] -> RAG(documents): NO | Internet(Tavily): NO | Model base-knowledge only: NO (returning 'no data' message)");
-            return Flux.just(
-                    ServerSentEvent.<String>builder(MSG_NO_DATA).event("token").build(),
-                    ServerSentEvent.<String>builder("[]").event("chart").build(),
-                    ServerSentEvent.<String>builder("[DONE]").event("done").build()
-            );
-        }
+        String context = (relevantDocs == null || relevantDocs.isEmpty())
+                ? ""
+                : buildFinancialContext(relevantDocs);
 
-        log.info("📊 RESPONSE SOURCE [FINANCIAL-STREAM] -> RAG(documents): YES ({} docs) | Internet(Tavily): NO | Model base-knowledge only: NO", relevantDocs.size());
-
-        String context = buildFinancialContext(relevantDocs);
+        log.info("[FINSIGHT-STREAM] RAG: {} | Tavily: No",
+                (relevantDocs == null || relevantDocs.isEmpty())
+                        ? "No" : "Yes (" + relevantDocs.size() + " docs)");
         String userPrompt = buildDetailedPrompt(query, context);
 
         SystemMessage systemMessage = new SystemMessage(FINANCIAL_SYSTEM_PROMPT);
@@ -273,21 +672,63 @@ public class FinancialAssistantService {
 
         StringBuilder accumulated = new StringBuilder();
 
-        Flux<ServerSentEvent<String>> tokens = chatModel.stream(prompt)
+        // Buffer the last N chars so we can detect "CHARTDATA_JSON:" even when it
+        // arrives split across multiple tokens.  Once detected, suppress the rest.
+        final String CHART_MARKER = "CHARTDATA_JSON:";
+        java.util.concurrent.atomic.AtomicBoolean suppress =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        java.util.concurrent.atomic.AtomicReference<String> pending =
+                new java.util.concurrent.atomic.AtomicReference<>("");
+
+        Flux<String> cleanTokens = chatModel.stream(prompt)
                 .map(this::extractText)
                 .filter(t -> !t.isEmpty())
                 .doOnNext(accumulated::append)
+                .map(token -> {
+                    if (suppress.get()) return "";
+                    String s = pending.getAndSet("") + token;
+                    int idx = s.indexOf(CHART_MARKER);
+                    if (idx >= 0) {
+                        suppress.set(true);
+                        // emit only what came before the marker (trim trailing newline)
+                        return idx > 0 ? s.substring(0, idx).stripTrailing() : "";
+                    }
+                    // Keep the last (marker-length) chars buffered to catch splits
+                    if (s.length() > CHART_MARKER.length()) {
+                        String emit = s.substring(0, s.length() - CHART_MARKER.length());
+                        pending.set(s.substring(s.length() - CHART_MARKER.length()));
+                        return emit;
+                    }
+                    pending.set(s);
+                    return "";
+                })
+                .filter(t -> !t.isEmpty())
+                // Flush the trailing buffer once the stream ends (if no marker was found)
+                .concatWith(Flux.defer(() -> {
+                    String rem = pending.getAndSet("");
+                    return (rem.isEmpty() || suppress.get())
+                            ? Flux.empty()
+                            : Flux.just(rem);
+                }));
+
+        Flux<ServerSentEvent<String>> tokens = cleanTokens
                 .map(t -> ServerSentEvent.<String>builder(t).event("token").build());
 
         // After the text finishes streaming, emit the chart data (extracted from the
         // full accumulated text) followed by a completion marker.
         Flux<ServerSentEvent<String>> tail = Flux.defer(() -> {
+            String rawText = accumulated.toString();
+            // Strip CHARTDATA_JSON line before logging and storing as the user-visible answer
+            String text = rawText.replaceAll("(?m)^CHARTDATA_JSON:.*$", "").stripTrailing();
             String chartJson = "[]";
             try {
                 chartJson = new com.fasterxml.jackson.databind.ObjectMapper()
-                        .writeValueAsString(extractChartDataFromText(accumulated.toString()));
+                        .writeValueAsString(extractChartDataFromText(rawText));
             } catch (Exception e) {
-                log.warn("Could not build chart JSON for stream: {}", e.getMessage());
+                log.warn("Could not build chart JSON: {}", e.getMessage());
+            }
+            if (!text.isBlank()) {
+                log.info("[FINSIGHT-STREAM] Response: {}", text);
             }
             return Flux.just(
                     ServerSentEvent.<String>builder(chartJson).event("chart").build(),
@@ -328,23 +769,14 @@ public class FinancialAssistantService {
                     .topP(topP)
                     .build();
 
-            log.info("FinancialAssistant calling model with Max Tokens: {}, Temperature: {}", maxTokens, temperature);
-
-            // Create prompt with message structure AND explicit options
             Prompt prompt = new Prompt(java.util.Arrays.asList(systemMessage, userMsg), options);
-
             ChatResponse chatResponse = chatModel.call(prompt);
             String response = chatResponse.getResult().getOutput().getText();
 
-            // Log token usage to verify full utilization
             var usage = chatResponse.getMetadata().getUsage();
-            log.info("FinancialAssistant Token Usage - Prompt: {}, Completion: {}/{}, Total: {}",
-                    usage.getPromptTokens(),
-                    usage.getCompletionTokens(),
-                    maxTokens,
-                    usage.getTotalTokens());
-
-            log.info("Model response received, length: {} characters", response.length());
+            double pct = ((double) usage.getCompletionTokens() / maxTokens) * 100;
+            log.info("[FINSIGHT] Tokens: {}/{} ({}%)",
+                    usage.getCompletionTokens(), maxTokens, String.format("%.1f", pct));
             return response;
         } catch (Exception e) {
             log.error("Error calling model: {}", e.getMessage());
@@ -353,7 +785,6 @@ public class FinancialAssistantService {
     }
 
     public String forecastFinancials(String company, String metric, int yearsAhead) {
-        log.info("Detailed Forecast: Company={}, Metric={}, Years={}", company, metric, yearsAhead);
 
         String query = String.format(
                 "Provide comprehensive 5-year financial forecast for %s: " +
@@ -369,38 +800,60 @@ public class FinancialAssistantService {
     }
 
     private String buildDetailedPrompt(String query, String context) {
-        return "FINANCIAL DATA:\n" + context + "\n\n" +
-                "ANALYSIS REQUEST: " + query + "\n\n" +
-                "Please provide comprehensive FinSight AI financial analysis following the required format:\n" +
-                "- Current company health snapshot\n" +
-                "- Complete historical performance (all years available)\n" +
-                "- Key insights\n" +
-                "- Five-year forecast (2025F-2029F) if 3+ historical periods exist\n" +
-                "- Risk assessment\n" +
-                "- Executive investment outlook";
+        StringBuilder sb = new StringBuilder();
+        if (context != null && !context.isBlank()) {
+            sb.append("RETRIEVED FINANCIAL DATA (use ALL of it -- every year, every metric):\n\n");
+            sb.append(context);
+            sb.append("\n\n");
+        } else {
+            sb.append("NOTE: No specific financial documents were retrieved. ");
+            sb.append("Answer using your financial knowledge and clearly state any assumptions you make.\n\n");
+        }
+        sb.append("USER REQUEST: ").append(query).append("\n\n");
+        sb.append("Internally determine the question type (Level 1-8) and apply the matching response structure — ");
+        sb.append("do NOT mention the level or triggers in your output. ");
+        sb.append("Be comprehensive. Use all available data. ");
+        sb.append("Proper Markdown: blank lines before/after every ## header and every table.");
+
+        // Detect future-year or future-growth queries and add explicit forecasting instruction
+        String ql = query.toLowerCase();
+        boolean hasFutureYear = query.matches(".*\\b(202[6-9]|203[0-9])\\b.*");
+        boolean hasFutureIntent = ql.contains("future") || ql.contains("forecast") ||
+                ql.contains("projected") || ql.contains("projection") ||
+                ql.contains("next year") || ql.contains("coming year") ||
+                ql.contains("predict") || ql.contains("by 20");
+        if (hasFutureYear || hasFutureIntent) {
+            sb.append("\n\nFORECASTING REQUIREMENT: This question asks about future performance. ");
+            sb.append("You MUST: ");
+            sb.append("(1) compute the historical CAGR from the data — show formula and result; ");
+            sb.append("(2) project year-by-year from the latest known year to the target year; ");
+            sb.append("(3) provide Bear / Base / Bull scenarios; ");
+            sb.append("(4) NEVER say you cannot forecast — derive projections from historical trend.");
+        }
+        return sb.toString();
     }
 
     private String buildFinancialContext(List<Document> documents) {
-        StringBuilder context = new StringBuilder();
-        context.append("FINANCIAL DATA:\n\n");
-
         if (documents.isEmpty()) {
             return "";
         }
 
-        // With Opus 4.8 and 20k tokens, include more documents and content
-        // Opus can handle larger context windows efficiently
-        int docCount = Math.min(5, documents.size());
-        for (int i = 0; i < docCount; i++) {
-            Document doc = documents.get(i);
+        // Deduplicate chunks by content prefix so we don't repeat the same block
+        // multiple times (different embedding queries can retrieve overlapping chunks).
+        java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
+        StringBuilder context = new StringBuilder();
+
+        int included = 0;
+        for (Document doc : documents) {
             String text = doc.getText();
-            // Include more content per document - up to 1200 chars
-            String truncated = text.length() > 1200 ? text.substring(0, 1200) + "[...]" : text;
-            context.append("Document ").append(i + 1).append(":\n");
-            context.append(truncated).append("\n\n");
+            if (text == null || text.isBlank()) continue;
+            String key = text.substring(0, Math.min(80, text.length())).trim();
+            if (!seen.add(key)) continue; // skip duplicate chunk
+
+            context.append(text.trim()).append("\n\n");
+            included++;
         }
 
-        log.info("Financial context prepared: {} characters from {} documents", context.length(), docCount);
         return context.toString();
     }
 
@@ -417,9 +870,7 @@ public class FinancialAssistantService {
             response.put("chartType", chartDataList.isEmpty() ? "none" : "line");
             response.put("chartData", chartDataList);
 
-            String result = mapper.writeValueAsString(response);
-            log.info("Wrapped JSON response: {} characters", result.length());
-            return result;
+            return mapper.writeValueAsString(response);
         } catch (Exception e) {
             log.error("Error wrapping analysis: {}", e.getMessage());
             Map<String, Object> error = new HashMap<>();
@@ -454,78 +905,133 @@ public class FinancialAssistantService {
             }
         }
 
-        // Otherwise, plain text response from model - just clean it up
+        // Otherwise, plain text response from model - clean it up and strip chart marker
+        text = text.replaceAll("(?m)^CHARTDATA_JSON:.*$", "").stripTrailing();
         return text;
     }
 
     /**
-     * Extracts an ordered list of chart points (revenue) from the analysis text.
-     * Each point is tagged as "historical" or "forecast" so the frontend can
-     * highlight the projected (add-on) portion of the trend distinctly.
-     * Forecast years are detected by the "F" suffix (e.g. "2025F") and labelled
-     * with that suffix.
+     * Extracts year-over-year chart data points from analysis text.
+     *
+     * Strategy 0 (most reliable): parse the model-supplied CHARTDATA_JSON:[...] line.
+     * Strategy 1: parse markdown table rows.
+     * Strategy 2: bidirectional prose scan.
      */
-    private List<Map<String, Object>> extractChartDataFromText(String analysis) {
+    public List<Map<String, Object>> extractChartDataFromText(String analysis) {
         List<Map<String, Object>> data = new ArrayList<>();
+        if (analysis == null || analysis.isBlank()) return data;
 
-        String[] years = {"2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024",
-                "2025", "2026", "2027", "2028", "2029", "2030"};
-
-        for (String year : years) {
-            // A year is a FORECAST if it appears with the F suffix (e.g. "2025F")
-            boolean isForecast = analysis.contains(year + "F");
-            String searchToken = isForecast ? year + "F" : year;
-
-            int index = analysis.indexOf(searchToken);
-            if (index < 0) {
-                continue;
-            }
-
-            // Look at the text right after the year token so we capture that
-            // year's revenue figure (the first currency amount following it).
-            int start = index;
-            int end = Math.min(analysis.length(), index + 120);
-            String context = analysis.substring(start, end);
-
-            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                "(?:Rs\\.?|INR|[₹$€£])\\s*([\\d,]+(?:\\.\\d+)?)\\s*(crores?|billions?|millions?|trillions?|B|M|bn|mn|cr|T)\\b",
-                java.util.regex.Pattern.CASE_INSENSITIVE
-            );
-            java.util.regex.Matcher matcher = pattern.matcher(context);
-
-            if (matcher.find()) {
-                String valueStr = matcher.group(1).replace(",", "").trim();
-                String magnitude = matcher.group(2).toLowerCase();
-
-                try {
-                    double value = Double.parseDouble(valueStr);
-
-                    if (magnitude.startsWith("cr")) {
-                        value *= 10_000_000;
-                    } else if (magnitude.startsWith("b")) {
-                        value *= 1_000_000_000;
-                    } else if (magnitude.startsWith("m") && magnitude.length() <= 3) {
-                        value *= 1_000_000;
-                    } else if (magnitude.startsWith("t")) {
-                        value *= 1_000_000_000_000L;
+        // --- Strategy 0: model-provided CHARTDATA_JSON block ---
+        java.util.regex.Matcher cdMatcher = java.util.regex.Pattern
+                .compile("^CHARTDATA_JSON:(\\[.*?\\])\\s*$", java.util.regex.Pattern.MULTILINE)
+                .matcher(analysis);
+        if (cdMatcher.find()) {
+            try {
+                com.fasterxml.jackson.databind.JsonNode arr =
+                        new com.fasterxml.jackson.databind.ObjectMapper().readTree(cdMatcher.group(1));
+                for (com.fasterxml.jackson.databind.JsonNode item : arr) {
+                    String year  = item.has("year")  ? item.get("year").asText()  : null;
+                    long   value = item.has("value") ? item.get("value").asLong() : 0;
+                    String type  = item.has("type")  ? item.get("type").asText()  : "historical";
+                    if (year != null && value > 0) {
+                        Map<String, Object> pt = new HashMap<>();
+                        pt.put("year",  year);
+                        pt.put("value", value);
+                        pt.put("type",  type);
+                        data.add(pt);
                     }
-
-                    Map<String, Object> item = new HashMap<>();
-                    item.put("year", isForecast ? year + "F" : year);
-                    item.put("value", (long) value);
-                    item.put("type", isForecast ? "forecast" : "historical");
-                    data.add(item);
-                    log.debug("Extracted {} value for {}: {}", isForecast ? "forecast" : "historical", year, (long) value);
-                } catch (NumberFormatException e) {
-                    log.debug("Could not parse value for year {}", year);
                 }
+                if (!data.isEmpty()) {
+                    log.info("Chart extraction: {} points from CHARTDATA_JSON block", data.size());
+                    return data;
+                }
+            } catch (Exception e) {
+                log.warn("CHARTDATA_JSON parse failed, falling back to regex: {}", e.getMessage());
+            }
+        }
+
+        java.util.Set<String> seenYears = new java.util.LinkedHashSet<>();
+
+        // Currency pattern: optional symbol prefix, number, mandatory magnitude unit
+        java.util.regex.Pattern currencyPat = java.util.regex.Pattern.compile(
+            "(?:Rs\\.?\\s*|INR\\s*|[₹$€£]\\s*)?([\\d,]+(?:\\.\\d+)?)\\s*(crores?|billions?|millions?|trillions?|lakh\\s*crores?|Cr\\b|B\\b|M\\b|bn\\b|mn\\b|T\\b)",
+            java.util.regex.Pattern.CASE_INSENSITIVE
+        );
+
+        // Strategy 1: markdown table rows  | FY2020 | $10 million | ...
+        java.util.regex.Pattern tableRowPat = java.util.regex.Pattern.compile(
+            "^\\|\\s*(?:FY)?(\\d{4})(F?)\\s*\\|([^|\\n]+)",
+            java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.MULTILINE
+        );
+        java.util.regex.Matcher tMatcher = tableRowPat.matcher(analysis);
+        while (tMatcher.find()) {
+            String year = tMatcher.group(1);
+            boolean isForecast = !tMatcher.group(2).isEmpty();
+            String firstCell = tMatcher.group(3);
+            if (seenYears.contains(year)) continue;
+            java.util.regex.Matcher vMatcher = currencyPat.matcher(firstCell);
+            if (vMatcher.find()) {
+                try {
+                    double value = Double.parseDouble(vMatcher.group(1).replace(",", ""));
+                    value = applyMagnitude(value, vMatcher.group(2));
+                    addChartPoint(data, seenYears, year, isForecast, (long) value);
+                } catch (NumberFormatException ignore) {}
+            }
+        }
+
+        // Strategy 2: bidirectional prose scan for remaining years
+        String[] candidates = {"2017","2018","2019","2020","2021","2022","2023","2024",
+                               "2025","2026","2027","2028","2029","2030","2031"};
+        for (String year : candidates) {
+            if (seenYears.contains(year)) continue;
+            boolean isForecast = analysis.contains(year + "F");
+            String token = isForecast ? year + "F" : year;
+            int idx = analysis.indexOf(token);
+            if (idx < 0) idx = analysis.indexOf("FY" + year);
+            if (idx < 0) continue;
+
+            // Look both before (for "from $X in FY2020") and after the year token
+            int wStart = Math.max(0, idx - 100);
+            int wEnd   = Math.min(analysis.length(), idx + 120);
+            String window = analysis.substring(wStart, wEnd);
+
+            java.util.regex.Matcher vMatcher = currencyPat.matcher(window);
+            if (vMatcher.find()) {
+                try {
+                    double value = Double.parseDouble(vMatcher.group(1).replace(",", ""));
+                    value = applyMagnitude(value, vMatcher.group(2));
+                    addChartPoint(data, seenYears, year, isForecast, (long) value);
+                } catch (NumberFormatException ignore) {}
             }
         }
 
         long forecastCount = data.stream().filter(d -> "forecast".equals(d.get("type"))).count();
-        log.info("Extracted {} chart data points ({} historical, {} forecast)",
+        log.info("Chart extraction: {} points ({} historical, {} forecast)",
                 data.size(), data.size() - forecastCount, forecastCount);
         return data;
+    }
+
+    private void addChartPoint(List<Map<String, Object>> data, java.util.Set<String> seen,
+                               String year, boolean isForecast, long value) {
+        Map<String, Object> item = new HashMap<>();
+        String label = isForecast ? year + "F" : year;
+        item.put("year",  label);
+        item.put("value", value);
+        item.put("type",  isForecast ? "forecast" : "historical");
+        data.add(item);
+        seen.add(year);
+        log.debug("Chart point: {} = {}", label, value);
+    }
+
+    private double applyMagnitude(double value, String magnitude) {
+        if (magnitude == null) return value;
+        String m = magnitude.toLowerCase().trim();
+        if (m.contains("lakh")) return value * 100_000_000_000.0; // lakh crore
+        if (m.startsWith("cr")) return value * 10_000_000.0;      // crores
+        if (m.equals("b") || m.equals("bn") || m.startsWith("bil")) return value * 1_000_000_000.0;
+        if (m.equals("m") || m.equals("mn") || m.startsWith("mil")) return value * 1_000_000.0;
+        if (m.equals("t") || m.startsWith("tr")) return value * 1_000_000_000_000.0;
+        return value;
     }
 
     @lombok.Data
