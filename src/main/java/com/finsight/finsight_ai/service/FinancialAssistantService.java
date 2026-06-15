@@ -10,6 +10,7 @@ import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
+import com.finsight.finsight_ai.service.search.TavilySearchService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
@@ -24,6 +25,7 @@ public class FinancialAssistantService {
 
     private final ChatModel chatModel;
     private final VectorStore vectorStore;
+    private final TavilySearchService tavilySearchService;
 
     // User-facing messages (never leak internals like "upload documents" or exceptions)
     private static final String MSG_NO_DATA =
@@ -63,7 +65,10 @@ public class FinancialAssistantService {
             FORMATTING -- NON-NEGOTIABLE
             ============================================================
 
-            Output ONLY Markdown. No JSON. No code fences. No preamble.
+            Output ONLY Markdown. No JSON. No code fences. No backticks. No preamble.
+            NEVER place any JSON object or array inside the text body — raw JSON visible
+            to the user is a CRITICAL ERROR. Chart data goes ONLY in the CHARTDATA_JSON
+            line at the very end (see CHART DATA section below).
 
             WRONG:  ## Company Overview- Revenue grew 15%
             CORRECT:
@@ -563,18 +568,27 @@ public class FinancialAssistantService {
             ============================================================
 
             Whenever your response contains financial data across 2 or more years (historical OR forecast),
-            you MUST append EXACTLY this line as the very last line of your response, after all markdown content:
+            append EXACTLY this line as the very LAST line of your response, after all markdown:
 
-            CHARTDATA_JSON:[{"year":"2020","value":10000000,"type":"historical"},{"year":"2024F","value":22000000,"type":"forecast"}]
+            CHARTDATA_JSON:[{"year":"FY2024","value":109913,"type":"historical"},{"year":"FY2025F","value":125000,"type":"forecast"}]
 
-            Rules:
-            - "value" = revenue (preferred) or primary metric in raw BASE units — no commas, no units
-              Examples: $10 million → 10000000 | Rs 500 Cr → 5000000000 | $1.2B → 1200000000
-            - "type" = "historical" for actual past data, "forecast" for projections
-            - "year" = 4-digit year for historical ("2020"), year+"F" for forecast ("2024F")
-            - Include ALL years mentioned in your response tables/analysis
-            - This line is consumed by the chart renderer and NEVER shown to the user
-            - If your response has NO multi-year financial figures (e.g. pure qualitative answer), OMIT the CHARTDATA_JSON line entirely
+            FORMAT RULES (no exceptions):
+            - "year": "FY" prefix + 4-digit year for historical → "FY2024"
+                       "FY" prefix + year + "F" for forecast    → "FY2025F"
+            - "value": the EXACT reported number in the SAME unit used in the response text
+                       If the response says "Rs 1,09,913 Crore"  → value is 109913
+                       If the response says "$10 billion"         → value is 10
+                       If the response says "$500 million"        → value is 500
+                       DO NOT convert to base units (not rupees, not cents, not raw dollars)
+            - "type": "historical" for actual data, "forecast" for projections
+            - Include EVERY year present in your response tables/analysis
+
+            ABSOLUTE TEXT PROHIBITION:
+            - NEVER embed any JSON array, JSON object, or code fence inside the text answer
+            - The text answer must contain ONLY Markdown: prose, tables, bullet points, headers
+            - Raw JSON visible to the user is a CRITICAL ERROR
+            - This CHARTDATA_JSON line is consumed by the chart renderer and NEVER shown to the user
+            - If NO multi-year financial figures exist (pure qualitative answer), OMIT the CHARTDATA_JSON line entirely
             """;
 
 
@@ -582,8 +596,21 @@ public class FinancialAssistantService {
         try {
             List<Document> relevantDocs = searchDocuments(query);
             String context = relevantDocs.isEmpty() ? "" : buildFinancialContext(relevantDocs);
-            log.info("[FINSIGHT] RAG: {} | Tavily: No",
-                    relevantDocs.isEmpty() ? "No" : "Yes (" + relevantDocs.size() + " docs)");
+            boolean tavilyUsed = false;
+
+            // Fallback: RAG returned nothing, OR the docs retrieved don't mention the
+            // company/entity being asked about (e.g. HCL docs for a Meta query).
+            if (context.isBlank() || !isRagContextRelevant(query, context)) {
+                String tavilyResult = tavilySearchService.search(query);
+                if (tavilyResult != null && !tavilyResult.isBlank()) {
+                    context = tavilyResult;
+                    tavilyUsed = true;
+                }
+            }
+
+            log.info("[FINSIGHT] RAG: {} | Tavily: {}",
+                    relevantDocs.isEmpty() ? "No" : "Yes (" + relevantDocs.size() + " docs)",
+                    tavilyUsed ? "Yes" : "No");
 
             String userPrompt = buildDetailedPrompt(query, context);
             String rawAnalysis = callModelWithSystemPrompt(userPrompt);
@@ -655,10 +682,26 @@ public class FinancialAssistantService {
         String context = (relevantDocs == null || relevantDocs.isEmpty())
                 ? ""
                 : buildFinancialContext(relevantDocs);
+        boolean tavilyUsed = false;
 
-        log.info("[FINSIGHT-STREAM] RAG: {} | Tavily: No",
+        // Fallback: RAG returned nothing, OR the docs don't mention the company being asked
+        // about (e.g. HCL docs returned for a Meta query — irrelevant context).
+        if (context.isBlank() || !isRagContextRelevant(query, context)) {
+            try {
+                String tavilyResult = tavilySearchService.search(query);
+                if (tavilyResult != null && !tavilyResult.isBlank()) {
+                    context = tavilyResult;
+                    tavilyUsed = true;
+                }
+            } catch (Exception e) {
+                log.warn("Tavily search failed: {}", e.getMessage());
+            }
+        }
+
+        log.info("[FINSIGHT-STREAM] RAG: {} | Tavily: {}",
                 (relevantDocs == null || relevantDocs.isEmpty())
-                        ? "No" : "Yes (" + relevantDocs.size() + " docs)");
+                        ? "No" : "Yes (" + relevantDocs.size() + " docs)",
+                tavilyUsed ? "Yes" : "No");
         String userPrompt = buildDetailedPrompt(query, context);
 
         SystemMessage systemMessage = new SystemMessage(FINANCIAL_SYSTEM_PROMPT);
@@ -672,9 +715,10 @@ public class FinancialAssistantService {
 
         StringBuilder accumulated = new StringBuilder();
 
-        // Buffer the last N chars so we can detect "CHARTDATA_JSON:" even when it
-        // arrives split across multiple tokens.  Once detected, suppress the rest.
-        final String CHART_MARKER = "CHARTDATA_JSON:";
+        // Buffer the last N chars so we can detect "CHARTDATA_JSON" even when it
+        // arrives split across multiple tokens. Use the prefix WITHOUT ":" so we
+        // also catch malformed outputs like "CHARTDATA_JSON{..." (missing colon).
+        final String CHART_MARKER = "CHARTDATA_JSON";
         java.util.concurrent.atomic.AtomicBoolean suppress =
                 new java.util.concurrent.atomic.AtomicBoolean(false);
         java.util.concurrent.atomic.AtomicReference<String> pending =
@@ -719,7 +763,7 @@ public class FinancialAssistantService {
         Flux<ServerSentEvent<String>> tail = Flux.defer(() -> {
             String rawText = accumulated.toString();
             // Strip CHARTDATA_JSON line before logging and storing as the user-visible answer
-            String text = rawText.replaceAll("(?m)^CHARTDATA_JSON:.*$", "").stripTrailing();
+            String text = rawText.replaceAll("(?m)^CHARTDATA_JSON.*$", "").stripTrailing();
             String chartJson = "[]";
             try {
                 chartJson = new com.fasterxml.jackson.databind.ObjectMapper()
@@ -797,6 +841,46 @@ public class FinancialAssistantService {
         );
 
         return analyzeFinancials(query);
+    }
+
+    /**
+     * Returns true when the RAG context actually mentions the company/entity being asked
+     * about in the query. If the query contains a proper noun (e.g. "Meta", "Tesla") and
+     * none of those words appear in the retrieved context, the docs are irrelevant and
+     * Tavily should be used instead.
+     *
+     * Common English words that happen to start with a capital at the beginning of a
+     * sentence are excluded from the check so they don't produce false positives.
+     */
+    private static final java.util.Set<String> COMMON_WORDS = java.util.Set.of(
+            "tell", "what", "show", "give", "how", "the", "about", "over", "last",
+            "next", "years", "year", "growth", "revenue", "profit", "financial",
+            "analysis", "compare", "will", "where", "when", "who", "why", "which",
+            "can", "could", "would", "should", "does", "did", "has", "have", "had",
+            "its", "their", "our", "your", "more", "much", "many", "some", "any"
+    );
+
+    private boolean isRagContextRelevant(String query, String context) {
+        if (context == null || context.isBlank()) return false;
+        if (query == null || query.isBlank()) return true; // no basis to judge → keep RAG
+
+        String contextLower = context.toLowerCase();
+        String[] words = query.trim().split("\\s+");
+
+        for (String word : words) {
+            // Strip punctuation and check only capitalized words of 3+ chars
+            String clean = word.replaceAll("[^a-zA-Z]", "");
+            if (clean.length() < 3) continue;
+            if (!Character.isUpperCase(clean.charAt(0))) continue;
+            String lower = clean.toLowerCase();
+            if (COMMON_WORDS.contains(lower)) continue;
+
+            // A proper noun from the query was found in the context → relevant
+            if (contextLower.contains(lower)) return true;
+        }
+
+        // No proper noun from the query matched — context is likely about a different company
+        return false;
     }
 
     private String buildDetailedPrompt(String query, String context) {
@@ -906,7 +990,7 @@ public class FinancialAssistantService {
         }
 
         // Otherwise, plain text response from model - clean it up and strip chart marker
-        text = text.replaceAll("(?m)^CHARTDATA_JSON:.*$", "").stripTrailing();
+        text = text.replaceAll("(?m)^CHARTDATA_JSON.*$", "").stripTrailing();
         return text;
     }
 
@@ -922,13 +1006,18 @@ public class FinancialAssistantService {
         if (analysis == null || analysis.isBlank()) return data;
 
         // --- Strategy 0: model-provided CHARTDATA_JSON block ---
+        // Accept both "CHARTDATA_JSON:[...]" (correct) and "CHARTDATA_JSON{...}" (missing ":[")
         java.util.regex.Matcher cdMatcher = java.util.regex.Pattern
-                .compile("^CHARTDATA_JSON:(\\[.*?\\])\\s*$", java.util.regex.Pattern.MULTILINE)
+                .compile("^CHARTDATA_JSON:?\\s*(.+)$", java.util.regex.Pattern.MULTILINE)
                 .matcher(analysis);
         if (cdMatcher.find()) {
             try {
+                String rawJson = cdMatcher.group(1).trim();
+                // Normalize: if it starts with { (missing "["), wrap it in an array
+                if (rawJson.startsWith("{")) rawJson = "[" + rawJson;
+                if (!rawJson.startsWith("[")) rawJson = "[" + rawJson + "]";
                 com.fasterxml.jackson.databind.JsonNode arr =
-                        new com.fasterxml.jackson.databind.ObjectMapper().readTree(cdMatcher.group(1));
+                        new com.fasterxml.jackson.databind.ObjectMapper().readTree(rawJson);
                 for (com.fasterxml.jackson.databind.JsonNode item : arr) {
                     String year  = item.has("year")  ? item.get("year").asText()  : null;
                     long   value = item.has("value") ? item.get("value").asLong() : 0;

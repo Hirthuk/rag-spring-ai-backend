@@ -29,9 +29,10 @@ public class TavilySearchService {
                       "api_key":"%s",
                       "query":"%s",
                       "search_depth":"advanced",
-                      "include_answer":true
+                      "include_answer":true,
+                      "max_results":5
                     }
-                    """.formatted(apiKey, query);
+                    """.formatted(apiKey, query.replace("\"", "\\\""));
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create("https://api.tavily.com/search"))
@@ -46,10 +47,32 @@ public class TavilySearchService {
             );
 
             JsonNode root = objectMapper.readTree(response.body());
-            return root.path("answer").asText("");
+            StringBuilder result = new StringBuilder();
+
+            // Include the synthesised answer if Tavily produced one
+            String answer = root.path("answer").asText("");
+            if (!answer.isBlank()) {
+                result.append(answer).append("\n\n");
+            }
+
+            // Append top-3 result snippets for richer financial context
+            JsonNode results = root.path("results");
+            if (results.isArray()) {
+                int count = 0;
+                for (JsonNode r : results) {
+                    if (count++ >= 3) break;
+                    String title   = r.path("title").asText("");
+                    String content = r.path("content").asText("");
+                    if (!content.isBlank()) {
+                        if (!title.isBlank()) result.append("Source: ").append(title).append("\n");
+                        result.append(content).append("\n\n");
+                    }
+                }
+            }
+
+            return result.toString().trim();
 
         } catch (Exception e) {
-            e.printStackTrace(); // Log the error for debugging
             return "";
         }
     }

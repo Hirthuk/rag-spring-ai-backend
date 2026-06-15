@@ -145,9 +145,9 @@ public class UploadService {
                                 metadata
                         );
 
-                vectorStore.add(
-                        companyDocuments
-                );
+                // Cohere embedding API on Bedrock rejects batches > 128 texts.
+                // Split into batches of 96 to stay safely under the limit.
+                addInBatches(companyDocuments);
 
                 log.info(
                         "Stored {} company documents from Excel",
@@ -178,9 +178,14 @@ public class UploadService {
 
             Document document = new Document(extractedText, metadata);
 
+            // Cohere embed-english-v3 on Bedrock has a hard 512-token input limit.
+            // TokenTextSplitter counts real tokens (CL100K tokenizer), so 800 tokens
+            // exceeded the limit and caused "Invalid parameter combination" from Bedrock.
+            // 380 tokens keeps every chunk comfortably under 512 even for number-dense
+            // financial text that tokenises more heavily than prose.
             TokenTextSplitter splitter = TokenTextSplitter.builder()
-                    .withChunkSize(800)
-                    .withMinChunkSizeChars(350)
+                    .withChunkSize(380)
+                    .withMinChunkSizeChars(50)
                     .withMinChunkLengthToEmbed(5)
                     .withMaxNumChunks(10000)
                     .withKeepSeparator(true)
@@ -352,167 +357,120 @@ public class UploadService {
     }
 
     /**
-     * Extract company documents from Excel - each row becomes a separate document
+     * Add documents to the vector store in batches.
+     * Cohere embed on Bedrock rejects any batch with more than 128 texts.
+     */
+    private static final int COHERE_BATCH_SIZE = 96;
+
+    private void addInBatches(List<Document> docs) {
+        for (int i = 0; i < docs.size(); i += COHERE_BATCH_SIZE) {
+            List<Document> batch = docs.subList(i, Math.min(i + COHERE_BATCH_SIZE, docs.size()));
+            vectorStore.add(batch);
+            log.info("Embedded batch {}-{} of {} documents",
+                    i + 1, i + batch.size(), docs.size());
+        }
+    }
+
+    /**
+     * Extract documents from Excel — header-aware, works with any column structure.
+     * Each data row becomes one document. Rows are grouped by company when a company
+     * column is detected, so the model gets all years for a company in one context chunk.
      */
     private List<Document> extractCompanyDocumentsFromExcel(
             MultipartFile file,
             Map<String, Object> baseMetadata
     ) {
+        List<Document> documents = new ArrayList<>();
 
-        List<Document> documents =
-                new ArrayList<>();
+        try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
 
-        try (
-                Workbook workbook =
-                        WorkbookFactory.create(
-                                file.getInputStream()
-                        )
-        ) {
+            for (int sheetIdx = 0; sheetIdx < workbook.getNumberOfSheets(); sheetIdx++) {
+                Sheet sheet = workbook.getSheetAt(sheetIdx);
 
-            Sheet sheet =
-                    workbook.getSheetAt(0);
+                // Find the first non-empty row and treat it as the header row
+                List<String> headers = new ArrayList<>();
+                int dataStartRow = -1;
 
-            Iterator<Row> rows =
-                    sheet.iterator();
+                for (Row row : sheet) {
+                    int lastCol = row.getLastCellNum();
+                    if (lastCol <= 0) continue;
+                    for (int c = 0; c < lastCol; c++) {
+                        String val = getCellValue(row.getCell(c)).trim();
+                        headers.add(val.isEmpty() ? ("Col" + c) : val);
+                    }
+                    dataStartRow = row.getRowNum() + 1;
+                    break;
+                }
 
-            if (!rows.hasNext()) {
-
-                return documents;
-            }
-
-            // Skip header row
-            rows.next();
-
-            while (rows.hasNext()) {
-
-                Row row = rows.next();
-
-                if (row.getPhysicalNumberOfCells() < 11) {
-
+                if (headers.isEmpty() || dataStartRow < 0) {
+                    log.warn("No headers found in sheet '{}' of {}", sheet.getSheetName(), file.getOriginalFilename());
                     continue;
                 }
 
-                String companyText =
-                        buildCompanyDocument(
-                                row
-                        );
+                // Detect which column holds the company name (case-insensitive search)
+                int companyCol = -1;
+                for (int i = 0; i < headers.size(); i++) {
+                    String h = headers.get(i).toLowerCase();
+                    if (h.contains("company") || h.equals("name") || h.contains("entity") || h.contains("firm")) {
+                        companyCol = i;
+                        break;
+                    }
+                }
 
-                Map<String,Object> metadata =
-                        new HashMap<>(
-                                baseMetadata
-                        );
+                // Group rows by company so all years for a company land in one document
+                java.util.LinkedHashMap<String, List<Row>> byCompany = new java.util.LinkedHashMap<>();
+                for (int rowNum = dataStartRow; rowNum <= sheet.getLastRowNum(); rowNum++) {
+                    Row row = sheet.getRow(rowNum);
+                    if (row == null) continue;
+                    // Skip completely empty rows
+                    boolean hasAnyData = false;
+                    for (int c = 0; c < headers.size(); c++) {
+                        if (!getCellValue(row.getCell(c)).trim().isEmpty()) { hasAnyData = true; break; }
+                    }
+                    if (!hasAnyData) continue;
 
-                metadata.put(
-                        "companyName",
-                        getCellValue(
-                                row.getCell(0)
-                        )
-                );
+                    String companyKey = (companyCol >= 0)
+                            ? getCellValue(row.getCell(companyCol)).trim()
+                            : "row-" + rowNum;
+                    byCompany.computeIfAbsent(companyKey, k -> new ArrayList<>()).add(row);
+                }
 
-                metadata.put(
-                        "ticker",
-                        getCellValue(
-                                row.getCell(1)
-                        )
-                );
+                // Build one document per company (all its rows concatenated)
+                for (Map.Entry<String, List<Row>> entry : byCompany.entrySet()) {
+                    String companyKey = entry.getKey();
+                    StringBuilder text = new StringBuilder();
 
-                metadata.put(
-                        "sector",
-                        getCellValue(
-                                row.getCell(2)
-                        )
-                );
+                    for (Row row : entry.getValue()) {
+                        for (int c = 0; c < headers.size(); c++) {
+                            String value = getCellValue(row.getCell(c)).trim();
+                            if (!value.isEmpty()) {
+                                text.append(headers.get(c)).append(": ").append(value).append(" | ");
+                            }
+                        }
+                        text.append("\n");
+                    }
 
-                Document companyDocument =
-                        new Document(
-                                companyText,
-                                metadata
-                        );
+                    String content = text.toString().trim();
+                    if (content.isEmpty()) continue;
 
-                documents.add(
-                        companyDocument
-                );
+                    Map<String, Object> metadata = new HashMap<>(baseMetadata);
+                    metadata.put("sheetName", sheet.getSheetName());
+                    metadata.put("companyName", companyKey);
+                    metadata.put("rowCount", entry.getValue().size());
+                    documents.add(new Document(content, metadata));
+                }
+
+                log.info("Sheet '{}': {} headers, {} company documents extracted",
+                        sheet.getSheetName(), headers.size(), byCompany.size());
             }
 
-            return documents;
-
         } catch (Exception e) {
-
-            throw new RuntimeException(
-                    "Failed to process Excel",
-                    e
-            );
+            throw new RuntimeException("Failed to process Excel: " + e.getMessage(), e);
         }
+
+        return documents;
     }
 
-    private String buildCompanyDocument(
-            Row row
-    ) {
-
-        String company =
-                getCellValue(row.getCell(0));
-
-        String fiscalYear =
-                getCellValue(row.getCell(3));
-
-        String revenue =
-                getCellValue(row.getCell(4));
-
-        String netProfit =
-                getCellValue(row.getCell(8));
-
-        String margin =
-                getCellValue(row.getCell(9));
-
-        return """
-                Company Name: %s
-
-                Ticker Symbol: %s
-
-                Sector: %s
-
-                Fiscal Year: %s
-
-                Revenue: %s Million USD
-
-                Cost Of Goods Sold: %s Million USD
-
-                Operating Expenses: %s Million USD
-
-                EBITDA: %s Million USD
-
-                Net Profit: %s Million USD
-
-                Profit Margin: %s Percent
-
-                Earnings Per Share: %s
-
-                Financial Summary:
-
-                %s generated revenue of %s million USD
-                and net profit of %s million USD
-                with profit margin of %s percent
-                during fiscal year %s.
-                """
-                .formatted(
-                        company,
-                        getCellValue(row.getCell(1)),
-                        getCellValue(row.getCell(2)),
-                        fiscalYear,
-                        revenue,
-                        getCellValue(row.getCell(5)),
-                        getCellValue(row.getCell(6)),
-                        getCellValue(row.getCell(7)),
-                        netProfit,
-                        margin,
-                        getCellValue(row.getCell(10)),
-                        company,
-                        revenue,
-                        netProfit,
-                        margin,
-                        fiscalYear
-                );
-    }
 
     private String getCellValue(
             Cell cell
