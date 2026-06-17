@@ -2,6 +2,7 @@ package com.finsight.finsight_ai.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.finsight.finsight_ai.service.s3.S3UploadService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.sourceforge.tess4j.Tesseract;
@@ -44,6 +45,7 @@ public class UploadService {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ChromaApi chromaApi;
     private final DocumentLoaderService documentLoaderService;
+    private final S3UploadService s3UploadService;
     // Supported image formats
     private static final Set<String> SUPPORTED_IMAGE_FORMATS = Set.of(
             "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"
@@ -65,12 +67,14 @@ public class UploadService {
         return tesseract;
     }
 
-    public void processFile(MultipartFile file) {
+    public void processFile(MultipartFile file, String userName) {
         try {
 
             String fileName = file.getOriginalFilename();
             String contentType = file.getContentType();
             String fileExtension = getFileExtension(fileName);
+
+            s3UploadService.uploadFile(file, userName);
 
             log.info("Processing file: {}, type: {}, size: {} bytes, extension: {}",
                     fileName, contentType, file.getSize(), fileExtension);

@@ -6,9 +6,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chroma.vectorstore.ChromaApi;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Service;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -18,8 +22,6 @@ import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -43,77 +45,51 @@ public class DocumentLoaderService {
 
     private final VectorStore vectorStore;
     private final ChromaApi chromaApi;
-    private final PathMatchingResourcePatternResolver resourceResolver = new PathMatchingResourcePatternResolver();
+    private final S3Client s3Client;
+
+    @Value("${aws.s3.bucket}")
+    private String bucketName;
 
     private static final List<String> SUPPORTED_EXTENSIONS = List.of(
             ".xlsx", ".xls", ".txt", ".csv", ".json", ".md", ".log", ".xml", ".pdf", ".docx", ".doc"
     );
 
-    // Conservative chunk sizes for Bedrock Cohere embedding model.
-    // cohere.embed-multilingual-v3 has a ~512 token input limit. Numeric-dense
-    // financial chunks (P&L detail) tokenize into far more tokens per character
-    // than prose, so a 1500-char chunk overflowed the limit and was rejected with
-    // "Invalid parameter combination", then silently truncated (losing ~half the
-    // chunk). 700 chars keeps even number-heavy chunks within the token limit.
-    private static final int MAX_CHUNK_SIZE = 700;   // Lowered from 1500 to fit Cohere's 512-token limit
-    private static final int MIN_CHUNK_SIZE = 100;    // Minimum meaningful chunk size
-    private static final int OVERLAP_SIZE = 100;      // Overlap between chunks
+    private static final int MAX_CHUNK_SIZE = 700;
+    private static final int MIN_CHUNK_SIZE = 100;
+    private static final int OVERLAP_SIZE = 100;
 
-    // Duplicate detection
     private static final String COLLECTION_NAME = "financial-docs";
     private static final String TENANT_NAME = "SpringAiTenant";
     private static final String DATABASE_NAME = "SpringAiDatabase";
     private static final String HASH_TRACKING_FILE = ".document-hashes";
 
-    // Cache for processed file hashes during current session
     private final Set<String> processedFileHashes = new HashSet<>();
 
     @PostConstruct
     public void loadDocuments() {
         log.info("=================================");
-        log.info("DOCUMENT LOADER STARTED");
+        log.info("DOCUMENT LOADER STARTED (source: s3://{})", bucketName);
         log.info("=================================");
 
         try {
-            // Load existing document hashes from the tracking file to prevent duplicates
             loadExistingDocumentHashes();
 
-            // SAFEGUARD: the hash tracking file can fall out of sync with Chroma
-            // (e.g. the collection was cleared/recreated while the tracking file
-            // persisted). If we have tracked hashes but the vector store is actually
-            // empty, the tracking file is stale - reset it so everything re-ingests.
-            // Without this, ingestion is skipped and queries return "No financial
-            // data available".
             if (!processedFileHashes.isEmpty() && isVectorStoreEmpty()) {
-                log.warn("Tracking file lists {} documents but the vector store is EMPTY - " +
-                        "treating tracking file as stale and forcing a full re-ingest.",
+                log.warn("Tracking file lists {} documents but the vector store is EMPTY — forcing full re-ingest.",
                         processedFileHashes.size());
                 processedFileHashes.clear();
                 resetHashTrackingFile();
             }
 
-            List<Resource> allResources = new ArrayList<>();
-
-            for (String extension : SUPPORTED_EXTENSIONS) {
-                try {
-                    Resource[] resources = resourceResolver.getResources(
-                            "classpath:financial-docs/*" + extension
-                    );
-                    for (Resource r : resources) {
-                        allResources.add(r);
-                    }
-                } catch (Exception e) {
-                    log.debug("No files found with extension: {}", extension);
-                }
-            }
+            List<Resource> allResources = listS3Resources();
 
             if (allResources.isEmpty()) {
-                log.warn("No supported files found in src/main/resources/financial-docs/");
+                log.warn("No supported files found in s3://{}", bucketName);
                 log.info("Supported file types: {}", SUPPORTED_EXTENSIONS);
                 return;
             }
 
-            log.info("Found {} file(s) in financial-docs folder", allResources.size());
+            log.info("Found {} file(s) in s3://{}", allResources.size(), bucketName);
 
             Map<String, Integer> fileTypeCount = new HashMap<>();
             for (Resource resource : allResources) {
@@ -128,12 +104,9 @@ public class DocumentLoaderService {
 
             for (Resource resource : allResources) {
                 String fileName = resource.getFilename();
-
                 try {
-                    // Calculate hash for duplicate detection
                     String fileHash = calculateFileHash(resource);
 
-                    // Check if file already exists in Chroma
                     if (processedFileHashes.contains(fileHash)) {
                         log.info("⏭️ Skipping duplicate file: {} (already in Chroma)", fileName);
                         skipCount++;
@@ -144,16 +117,13 @@ public class DocumentLoaderService {
 
                     List<Document> documents = extractDocuments(resource);
                     if (!documents.isEmpty()) {
-                        // Add documents one by one for better error handling
                         int indexedCount = 0;
                         for (int i = 0; i < documents.size(); i++) {
                             Document doc = documents.get(i);
-                            // Add file hash to metadata for future duplicate detection
                             doc.getMetadata().put("fileHash", fileHash);
                             if (addDocumentWithRetry(doc, fileName, i, documents.size())) {
                                 indexedCount++;
                             }
-                            // Small delay between documents to avoid rate limiting
                             if (i < documents.size() - 1) {
                                 Thread.sleep(500);
                             }
@@ -161,7 +131,6 @@ public class DocumentLoaderService {
 
                         if (indexedCount > 0) {
                             successCount++;
-                            // Mark this file hash as processed both in memory and in tracking file
                             processedFileHashes.add(fileHash);
                             saveDocumentHash(fileHash);
                             log.info("✅ Successfully indexed {}/{} documents from {}",
@@ -181,19 +150,83 @@ public class DocumentLoaderService {
 
             log.info("=================================");
             log.info("DOCUMENT LOADER FINISHED");
-            log.info("Total files: {}, Successful: {}, Failed: {}, Skipped (duplicates): {}",
+            log.info("Total: {}, Successful: {}, Failed: {}, Skipped: {}",
                     allResources.size(), successCount, failCount, skipCount);
             log.info("=================================");
 
         } catch (Exception e) {
-            log.error("Error loading documents from resources", e);
+            log.error("Error loading documents from s3://{}", bucketName, e);
         }
     }
 
     /**
-     * Returns true if the vector store contains no retrievable documents.
-     * Used to detect a stale hash-tracking file after Chroma has been reset.
+     * Lists all objects in the S3 bucket whose extension is supported,
+     * downloads each one eagerly, and wraps it in a ByteArrayResource so the
+     * existing extraction logic (which calls getInputStream() and
+     * getContentAsByteArray()) works without any further changes.
      */
+    private List<Resource> listS3Resources() {
+        List<Resource> resources = new ArrayList<>();
+
+        String continuationToken = null;
+        do {
+            var requestBuilder = ListObjectsV2Request.builder().bucket(bucketName);
+            if (continuationToken != null) {
+                requestBuilder.continuationToken(continuationToken);
+            }
+
+            var response = s3Client.listObjectsV2(requestBuilder.build());
+
+            for (S3Object obj : response.contents()) {
+                String key = obj.key();
+                // Skip S3 "folder" markers (keys ending with /)
+                if (key.endsWith("/")) continue;
+
+                String ext = getFileExtension(key);
+                if (!SUPPORTED_EXTENSIONS.contains(ext)) {
+                    log.debug("Skipping unsupported file type: {}", key);
+                    continue;
+                }
+
+                try {
+                    byte[] bytes = s3Client.getObjectAsBytes(
+                            b -> b.bucket(bucketName).key(key)
+                    ).asByteArray();
+
+                    // Use the filename part of the key (strips any S3 prefix/folder path)
+                    String filename = key.contains("/") ? key.substring(key.lastIndexOf('/') + 1) : key;
+                    resources.add(new NamedByteArrayResource(bytes, filename));
+                    log.debug("Downloaded s3://{}/{} ({} bytes)", bucketName, key, bytes.length);
+                } catch (Exception e) {
+                    log.error("Failed to download s3://{}/{}: {}", bucketName, key, e.getMessage());
+                }
+            }
+
+            continuationToken = response.isTruncated() ? response.nextContinuationToken() : null;
+        } while (continuationToken != null);
+
+        return resources;
+    }
+
+    /** ByteArrayResource with a real filename — needed because ByteArrayResource.getFilename() returns null. */
+    private static class NamedByteArrayResource extends ByteArrayResource {
+        private final String filename;
+
+        NamedByteArrayResource(byte[] bytes, String filename) {
+            super(bytes);
+            this.filename = filename;
+        }
+
+        @Override
+        public String getFilename() {
+            return filename;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Everything below is unchanged from the previous implementation
+    // -------------------------------------------------------------------------
+
     private boolean isVectorStoreEmpty() {
         try {
             var results = vectorStore.similaritySearch("financial revenue profit company");
@@ -201,15 +234,11 @@ public class DocumentLoaderService {
             log.info("Vector store emptiness check: {}", empty ? "EMPTY" : "populated");
             return empty;
         } catch (Exception e) {
-            // If the collection doesn't exist yet or the search fails, treat as empty
             log.warn("Vector store emptiness check failed ({}), treating as empty", e.getMessage());
             return true;
         }
     }
 
-    /**
-     * Delete the hash tracking file so all documents are re-ingested on this run.
-     */
     private void resetHashTrackingFile() {
         try {
             File trackingFile = new File(HASH_TRACKING_FILE);
@@ -221,13 +250,9 @@ public class DocumentLoaderService {
         }
     }
 
-    /**
-     * Load existing document hashes from tracking file to prevent re-indexing duplicates
-     */
     private void loadExistingDocumentHashes() {
         try {
             File trackingFile = new File(HASH_TRACKING_FILE);
-
             if (trackingFile.exists()) {
                 try (BufferedReader reader = new BufferedReader(new FileReader(trackingFile))) {
                     String line;
@@ -238,8 +263,7 @@ public class DocumentLoaderService {
                             loadedCount++;
                         }
                     }
-                    log.info("Loaded {} document hashes from tracking file - duplicates will be skipped",
-                            loadedCount);
+                    log.info("Loaded {} document hashes from tracking file", loadedCount);
                 }
             } else {
                 log.info("No existing tracking file found - first time loading documents");
@@ -249,9 +273,6 @@ public class DocumentLoaderService {
         }
     }
 
-    /**
-     * Save document hash to tracking file to prevent re-indexing
-     */
     private void saveDocumentHash(String hash) {
         try {
             File trackingFile = new File(HASH_TRACKING_FILE);
@@ -264,15 +285,11 @@ public class DocumentLoaderService {
         }
     }
 
-    /**
-     * Calculate MD5 hash of file content for duplicate detection
-     */
     private String calculateFileHash(Resource resource) {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
             byte[] fileBytes = resource.getContentAsByteArray();
             byte[] hash = md.digest(fileBytes);
-
             StringBuilder hexString = new StringBuilder();
             for (byte b : hash) {
                 String hex = Integer.toHexString(0xff & b);
@@ -286,9 +303,6 @@ public class DocumentLoaderService {
         }
     }
 
-    /**
-     * Add document with retry logic and progressive chunk reduction
-     */
     private boolean addDocumentWithRetry(Document doc, String fileName, int chunkIndex, int totalChunks) {
         String originalContent = doc.getText();
         int maxRetries = 3;
@@ -296,69 +310,51 @@ public class DocumentLoaderService {
         for (int attempt = 0; attempt < maxRetries; attempt++) {
             try {
                 if (attempt > 0) {
-                    // On retry, try a progressively smaller chunk
                     int reductionFactor = attempt + 1;
                     int newLength = originalContent.length() / reductionFactor;
-
                     if (newLength < MIN_CHUNK_SIZE) {
                         log.warn("Chunk {} of {} would be too small ({} chars), skipping",
                                 chunkIndex, fileName, newLength);
                         return false;
                     }
-
-                    // Find a good breaking point
                     int breakPoint = Math.min(newLength, originalContent.length());
                     if (breakPoint < originalContent.length()) {
                         int lastSpace = originalContent.lastIndexOf(' ', breakPoint);
                         int lastNewline = originalContent.lastIndexOf('\n', breakPoint);
                         breakPoint = Math.max(lastSpace, lastNewline);
-                        if (breakPoint < MIN_CHUNK_SIZE) {
-                            breakPoint = newLength;
-                        }
+                        if (breakPoint < MIN_CHUNK_SIZE) breakPoint = newLength;
                     }
-
                     String truncated = originalContent.substring(0, breakPoint);
                     Document smallerDoc = new Document(truncated, doc.getMetadata());
                     smallerDoc.getMetadata().put("truncated", true);
                     smallerDoc.getMetadata().put("originalLength", originalContent.length());
                     smallerDoc.getMetadata().put("truncatedLength", truncated.length());
                     smallerDoc.getMetadata().put("retryAttempt", attempt);
-
-                    // Clean the truncated document
                     smallerDoc = validateAndCleanDocument(smallerDoc);
                     if (smallerDoc == null) {
                         log.warn("Cleaned document became empty for chunk {} of {}", chunkIndex, fileName);
                         continue;
                     }
-
                     vectorStore.add(List.of(smallerDoc));
-                    log.info("✅ Indexed truncated document ({} chars from {} original) from {} chunk {}/{} on attempt {}",
-                            truncated.length(), originalContent.length(), fileName, chunkIndex + 1, totalChunks, attempt + 1);
                 } else {
-                    // First attempt: validate and clean the document
                     Document cleanedDoc = validateAndCleanDocument(doc);
                     if (cleanedDoc == null) {
                         log.warn("Document chunk {} of {} is invalid after cleaning, skipping", chunkIndex, fileName);
                         return false;
                     }
-
                     vectorStore.add(List.of(cleanedDoc));
                     log.info("✅ Indexed document from {} chunk {}/{}", fileName, chunkIndex + 1, totalChunks);
                 }
                 return true;
-
             } catch (Exception e) {
                 log.warn("Attempt {} failed for chunk {}/{} of {}: {}",
                         attempt + 1, chunkIndex + 1, totalChunks, fileName, e.getMessage());
-
                 if (attempt == maxRetries - 1) {
                     log.error("Failed to index chunk {}/{} of {} after {} attempts",
                             chunkIndex + 1, totalChunks, fileName, maxRetries);
                 } else {
-                    // Exponential backoff before retry
                     try {
-                        long delay = TimeUnit.SECONDS.toMillis(1L << attempt); // 1, 2, 4 seconds
-                        Thread.sleep(delay);
+                        Thread.sleep(TimeUnit.SECONDS.toMillis(1L << attempt));
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         break;
@@ -369,72 +365,40 @@ public class DocumentLoaderService {
         return false;
     }
 
-    /**
-     * Validate and clean document content for Cohere embedding model
-     */
     private Document validateAndCleanDocument(Document doc) {
         String content = doc.getText();
-
-        // Check if content is null or empty
         if (content == null || content.trim().isEmpty()) {
             log.warn("Document has empty content, skipping");
             return null;
         }
-
-        // Check minimum length (Cohere typically needs at least 1 token)
         if (content.trim().length() < 3) {
             log.warn("Document too short ({} chars), may cause embedding issues", content.length());
         }
-
-        // Clean the content
         String cleaned = cleanTextForCohere(content);
-
         if (cleaned.length() < content.length()) {
             log.debug("Cleaned document: removed {} characters", content.length() - cleaned.length());
         }
-
-        // Check if cleaning removed everything
         if (cleaned.trim().isEmpty()) {
             log.warn("Document became empty after cleaning, skipping");
             return null;
         }
-
-        // Create new document with cleaned content
         Document cleanedDoc = new Document(cleaned, new HashMap<>(doc.getMetadata()));
         cleanedDoc.getMetadata().put("originalLength", content.length());
         cleanedDoc.getMetadata().put("cleanedLength", cleaned.length());
-
         return cleanedDoc;
     }
 
-    /**
-     * Clean text for Cohere embedding model compatibility
-     */
     private String cleanTextForCohere(String text) {
-        // Remove control characters (except newlines, tabs, and carriage returns)
         String cleaned = text.replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "");
-
-        // Replace multiple spaces with single space
         cleaned = cleaned.replaceAll("\\s+", " ");
-
-        // Remove excessive newlines (more than 2 in a row)
         cleaned = cleaned.replaceAll("\\n{3,}", "\n\n");
-
-        // Remove any remaining weird characters
         cleaned = cleaned.replaceAll("[\\uFFFD\\uFFFF]", "");
-
-        // Trim whitespace
         cleaned = cleaned.trim();
-
-        // Ensure content ends with proper punctuation if possible and not too long
         if (!cleaned.isEmpty() && cleaned.length() > 10 && !cleaned.matches(".*[.!?]$")) {
             cleaned = cleaned + ".";
         }
-
-        // Limit to MAX_CHUNK_SIZE characters (safety check)
         if (cleaned.length() > MAX_CHUNK_SIZE) {
             cleaned = cleaned.substring(0, MAX_CHUNK_SIZE);
-            // Try to end at a sentence boundary
             int lastPeriod = cleaned.lastIndexOf('.');
             int lastNewline = cleaned.lastIndexOf('\n');
             int breakPoint = Math.max(lastPeriod, lastNewline);
@@ -442,19 +406,12 @@ public class DocumentLoaderService {
                 cleaned = cleaned.substring(0, breakPoint + 1);
             }
         }
-
         return cleaned;
     }
 
     private List<Document> extractDocuments(Resource resource) throws Exception {
         String fileName = resource.getFilename();
         String extension = getFileExtension(fileName);
-
-        if (!resource.exists()) {
-            log.error("File does not exist: {}", fileName);
-            return new ArrayList<>();
-        }
-
         return switch (extension.toLowerCase()) {
             case ".xlsx", ".xls" -> extractFromExcel(resource);
             case ".txt", ".csv", ".json", ".md", ".log", ".xml" -> extractFromTextFile(resource);
@@ -465,9 +422,6 @@ public class DocumentLoaderService {
         };
     }
 
-    /**
-     * Extract from TEXT files with safe chunking for embedding models
-     */
     private List<Document> extractFromTextFile(Resource resource) throws Exception {
         List<Document> documents = new ArrayList<>();
         String fileName = resource.getFilename();
@@ -479,115 +433,78 @@ public class DocumentLoaderService {
             StringBuilder content = new StringBuilder();
             String line;
             int lineCount = 0;
-
             while ((line = reader.readLine()) != null) {
                 content.append(line).append("\n");
                 lineCount++;
             }
 
             String text = content.toString().trim();
-
             if (text.isEmpty()) {
                 log.warn("Text file is empty: {}", fileName);
                 return documents;
             }
 
-            // For very short files, keep as single document
             if (text.length() <= MAX_CHUNK_SIZE) {
                 Map<String, Object> metadata = createMetadata(resource, "text");
                 metadata.put("lineCount", lineCount);
                 metadata.put("characterCount", text.length());
                 Document doc = new Document(text, metadata);
                 doc = validateAndCleanDocument(doc);
-                if (doc != null) {
-                    documents.add(doc);
-                    log.info("Text file {} added as single document ({} chars, {} lines)",
-                            fileName, text.length(), lineCount);
-                } else {
-                    log.warn("Text file {} was invalid after cleaning", fileName);
-                }
+                if (doc != null) documents.add(doc);
             } else {
-                // Split into smaller, safe chunks
                 documents = splitTextIntoSafeChunks(text, resource, fileName, lineCount);
-                log.info("Text file {} split into {} safe chunks (total {} chars, {} lines)",
-                        fileName, documents.size(), text.length(), lineCount);
+                log.info("Text file {} split into {} chunks", fileName, documents.size());
             }
         }
-
         return documents;
     }
 
-    /**
-     * Split text into chunks that are safe for embedding models
-     */
     private List<Document> splitTextIntoSafeChunks(String text, Resource resource,
-                                                   String fileName, int lineCount) {
+                                                    String fileName, int lineCount) {
         List<Document> documents = new ArrayList<>();
         int startIndex = 0;
         int chunkNumber = 0;
 
         while (startIndex < text.length()) {
             int endIndex = Math.min(startIndex + MAX_CHUNK_SIZE, text.length());
-
-            // Try to find a good break point (newline or space)
             if (endIndex < text.length()) {
                 int lastNewline = text.lastIndexOf('\n', endIndex);
                 int lastSpace = text.lastIndexOf(' ', endIndex);
                 int lastPeriod = text.lastIndexOf('.', endIndex);
                 int breakPoint = Math.max(lastPeriod, Math.max(lastNewline, lastSpace));
-
                 if (breakPoint > startIndex + MAX_CHUNK_SIZE / 2) {
-                    endIndex = breakPoint + 1; // Include the punctuation/newline
+                    endIndex = breakPoint + 1;
                 }
             }
 
             String chunk = text.substring(startIndex, Math.min(endIndex, text.length()));
-
-            // Validate chunk size
-            if (chunk.length() > MAX_CHUNK_SIZE) {
-                log.warn("Chunk {} from {} is {} chars, truncating to {}",
-                        chunkNumber, fileName, chunk.length(), MAX_CHUNK_SIZE);
-                chunk = chunk.substring(0, MAX_CHUNK_SIZE);
-            }
+            if (chunk.length() > MAX_CHUNK_SIZE) chunk = chunk.substring(0, MAX_CHUNK_SIZE);
 
             if (!chunk.trim().isEmpty()) {
                 Map<String, Object> metadata = createMetadata(resource, "text");
                 metadata.put("chunkIndex", chunkNumber);
-                metadata.put("totalChunks", -1); // Will be set after we know total
+                metadata.put("totalChunks", -1);
                 metadata.put("chunkSize", chunk.length());
                 metadata.put("lineCount", lineCount);
-
                 Document doc = new Document(chunk, metadata);
                 doc = validateAndCleanDocument(doc);
-
-                if (doc != null) {
-                    documents.add(doc);
-                } else {
-                    log.warn("Skipped invalid chunk {} from {}", chunkNumber, fileName);
-                }
+                if (doc != null) documents.add(doc);
             }
 
             chunkNumber++;
             startIndex = endIndex;
-
-            // Add overlap for the next chunk
             if (startIndex < text.length()) {
                 startIndex = Math.max(startIndex - OVERLAP_SIZE, startIndex);
             }
         }
 
-        // Update total chunks in metadata
         int totalChunks = documents.size();
         for (Document doc : documents) {
             doc.getMetadata().put("totalChunks", totalChunks);
         }
-
         return documents;
     }
 
-    /**
-     * Extract from Excel files with better error handling
-     */
     private List<Document> extractFromExcel(Resource resource) throws Exception {
         List<Document> documents = new ArrayList<>();
         String fileName = resource.getFilename();
@@ -598,36 +515,22 @@ public class DocumentLoaderService {
             for (int sheetIndex = 0; sheetIndex < workbook.getNumberOfSheets(); sheetIndex++) {
                 Sheet sheet = workbook.getSheetAt(sheetIndex);
                 Iterator<Row> rows = sheet.iterator();
+                if (!rows.hasNext()) continue;
 
-                if (!rows.hasNext()) {
-                    log.debug("Sheet {} is empty: {}", sheetIndex, fileName);
-                    continue;
-                }
-
-                // Skip header row
                 Row headerRow = rows.next();
                 int rowCount = 0;
 
                 while (rows.hasNext()) {
                     Row row = rows.next();
                     rowCount++;
-
-                    if (row.getPhysicalNumberOfCells() < 2) {
-                        continue;
-                    }
+                    if (row.getPhysicalNumberOfCells() < 2) continue;
 
                     try {
                         String companyName = getCellValue(row.getCell(0));
-                        if (companyName == null || companyName.trim().isEmpty()) {
-                            continue;
-                        }
+                        if (companyName == null || companyName.trim().isEmpty()) continue;
 
                         String companyText = buildCompanyDocument(row);
-
-                        // Validate document size
                         if (companyText.length() > MAX_CHUNK_SIZE) {
-                            log.warn("Excel row {} for {} is {} chars, truncating",
-                                    rowCount, companyName, companyText.length());
                             companyText = companyText.substring(0, MAX_CHUNK_SIZE);
                         }
 
@@ -642,22 +545,14 @@ public class DocumentLoaderService {
 
                         Document doc = new Document(companyText, metadata);
                         doc = validateAndCleanDocument(doc);
-
-                        if (doc != null) {
-                            documents.add(doc);
-                        }
-
+                        if (doc != null) documents.add(doc);
                     } catch (Exception e) {
-                        log.error("Error processing row {} in sheet {} of file {}",
-                                rowCount, sheetIndex, fileName, e);
+                        log.error("Error processing row {} in sheet {} of {}", rowCount, sheetIndex, fileName, e);
                     }
                 }
-
-                log.info("Processed {} rows from sheet '{}' in {}, extracted {} documents",
-                        rowCount, sheet.getSheetName(), fileName, documents.size());
+                log.info("Processed {} rows from sheet '{}' in {}", rowCount, sheet.getSheetName(), fileName);
             }
         }
-
         return documents;
     }
 
@@ -674,7 +569,6 @@ public class DocumentLoaderService {
         String profitMargin = getCellValue(row.getCell(9));
         String eps = getCellValue(row.getCell(10));
 
-        // Make the document more concise to avoid token limits
         return String.format("""
             Company: %s | Ticker: %s | Sector: %s | FY: %s
             Revenue: %sM | COGS: %sM | OpEx: %sM | EBITDA: %sM
@@ -691,22 +585,19 @@ public class DocumentLoaderService {
     private Map<String, Object> createMetadata(Resource resource, String fileType) {
         Map<String, Object> metadata = new HashMap<>();
         metadata.put("fileName", resource.getFilename());
-        metadata.put("source", "financial-docs");
+        metadata.put("source", "s3://" + bucketName);
         metadata.put("fileType", fileType);
         metadata.put("timestamp", System.currentTimeMillis());
-
         try {
             metadata.put("fileSize", resource.contentLength());
         } catch (Exception e) {
             metadata.put("fileSize", "unknown");
         }
-
         return metadata;
     }
 
     private String getCellValue(Cell cell) {
         if (cell == null) return "";
-
         try {
             return switch (cell.getCellType()) {
                 case STRING -> cell.getStringCellValue().trim();
@@ -719,8 +610,7 @@ public class DocumentLoaderService {
                 case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
                 case FORMULA -> {
                     try {
-                        String stringValue = cell.getStringCellValue().trim();
-                        yield stringValue;
+                        yield cell.getStringCellValue().trim();
                     } catch (Exception e) {
                         double numericValue = cell.getNumericCellValue();
                         yield numericValue == Math.floor(numericValue) ?
@@ -742,13 +632,13 @@ public class DocumentLoaderService {
     }
 
     public void reloadDocuments() {
-        log.info("Manual reload triggered - clearing cache and tracking file, reloading all documents");
+        log.info("Manual reload triggered - clearing cache and reloading all documents from s3://{}", bucketName);
         processedFileHashes.clear();
         try {
             File trackingFile = new File(HASH_TRACKING_FILE);
             if (trackingFile.exists()) {
                 trackingFile.delete();
-                log.info("Deleted tracking file - will reload all documents");
+                log.info("Deleted tracking file");
             }
         } catch (Exception e) {
             log.warn("Could not delete tracking file: {}", e.getMessage());

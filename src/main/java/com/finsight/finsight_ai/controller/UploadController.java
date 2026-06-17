@@ -17,7 +17,7 @@ public class UploadController {
 
     @PostMapping
     public ResponseEntity<String> uploadFile(
-            @RequestParam("file") MultipartFile file
+            @RequestParam("file") MultipartFile file, String userName
     ) {
         if (uploadService.isEmpty()) {
             return ResponseEntity.status(503).body(
@@ -25,7 +25,7 @@ public class UploadController {
             );
         }
 
-        uploadService.get().processFile(file);
+        uploadService.get().processFile(file, userName);
 
         return ResponseEntity.ok(
                 "File uploaded and embedded successfully"
