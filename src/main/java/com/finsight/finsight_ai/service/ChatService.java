@@ -103,6 +103,9 @@ public class ChatService {
             log.info("[CHAT] RAG: {} | Tavily: {}",
                     documents.isEmpty() ? "No" : "Yes (" + documents.size() + " docs)",
                     tavilyUsed ? "Yes" : "No");
+            if (!documents.isEmpty()) {
+                log.info("[CHAT] Documents used: {}", extractDocumentNames(documents));
+            }
 
             memoryService.addMessage(conversationId, "USER", userMessage);
 
@@ -198,6 +201,9 @@ public class ChatService {
 
             log.info("[CHAT-STREAM] RAG: {} | Tavily: No",
                     documents.isEmpty() ? "No" : "Yes (" + documents.size() + " docs)");
+            if (!documents.isEmpty()) {
+                log.info("[CHAT-STREAM] Documents used: {}", extractDocumentNames(documents));
+            }
 
             memoryService.addMessage(conversationId, "USER", userMessage);
             StringBuilder acc = new StringBuilder();
@@ -254,9 +260,13 @@ public class ChatService {
 
                 ABSOLUTE PROHIBITION — RAW JSON IS A CRITICAL ERROR:
                 Your text answer must NEVER contain any JSON object, JSON array, code fence, or
-                backtick block. If the context contains JSON or raw data structures, you MUST
-                synthesise and narrate them — transform every figure into prose, tables, or
-                bullet points. A response containing { }, [ ], or ``` in the answer body is wrong.
+                backtick block — even if the user explicitly asks for "JSON format", "CSV format",
+                "code format", or any structured data format. The user interface ONLY renders
+                Markdown; raw JSON/code is displayed as unreadable noise.
+                If the user asks for JSON, silently ignore that request and present the same
+                information as Markdown tables and bullet points. Never mention that you are
+                ignoring the format request — just deliver clean Markdown.
+                A response containing { }, [ ], ``` or any code fence is a CRITICAL ERROR.
 
                 Formatting rules:
                 - Use ## or ### headers for distinct sections
@@ -286,7 +296,10 @@ public class ChatService {
 
         // Block personal / generic questions whose subject is NOT a company
         // e.g. "What is my name?", "Who am I?", "What time is it?", "Where do I live?"
-        if (q.matches("^(what|who|how|where|when|why)\\s+(is|are|was|were|am|do|does|did|can|could|should|would|will)\\s+(i|my|me|we|our|you|your|it|the|this|that|a|an)\\b.*")) return false;
+        // GUARD: if the query also has financial keywords ("What is the Apex Company growth?"),
+        // do NOT block it — let it fall through to the financial routing checks below.
+        if (q.matches("^(what|who|how|where|when|why)\\s+(is|are|was|were|am|do|does|did|can|could|should|would|will)\\s+(i|my|me|we|our|you|your|it|the|this|that|a|an)\\b.*")
+                && !hasFinancialKeywordsQuick(q)) return false;
         // "Can you tell me your name?", "Do you know me?"
         if (q.matches("^(can|could|would|do|did|have|has|is|are)\\s+(you|i|we|they)\\b.*") && !hasFinancialKeywordsQuick(q)) return false;
 
@@ -326,8 +339,11 @@ public class ChatService {
         if (hasFutureYear || hasFutureGrowthPhrase) return true;
 
         // --- Level 5: comparison ---
-        if ((q.contains("compare") || q.contains(" vs ") || q.contains(" versus ") || q.contains("better than") ||
-             q.contains("which is better")) && (hasCompanyMention(q) || hasFinancialWord)) return true;
+        // NOTE: "comparison" does NOT contain "compare" as a substring — check both
+        if ((q.contains("compare") || q.contains("comparison") || q.contains(" vs ") || q.contains(" versus ") ||
+             q.contains("better than") || q.contains("which is better") || q.contains("head-to-head") ||
+             q.contains("head to head") || q.contains("between") && hasCompanyMention(q)) &&
+            (hasCompanyMention(q) || hasFinancialWord)) return true;
 
         // --- Level 6: investment ---
         if ((q.contains("invest") || q.contains("should i buy") || q.contains("buy or sell") ||
@@ -659,5 +675,15 @@ FINAL CHECKLIST BEFORE OUTPUTTING
 ✓ chartData values are plain integers, chartData years are strings
 ✓ NEVER mention documents, context, retrieval, or your internal process
 """;
+    }
+
+    private List<String> extractDocumentNames(List<Document> documents) {
+        return documents.stream()
+                .map(doc -> {
+                    Object name = doc.getMetadata().get("fileName");
+                    return name != null ? name.toString() : "unknown";
+                })
+                .distinct()
+                .collect(Collectors.toList());
     }
 }

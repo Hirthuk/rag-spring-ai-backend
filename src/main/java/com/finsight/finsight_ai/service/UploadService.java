@@ -15,13 +15,18 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.core.io.Resource;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.ByteArrayInputStream;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import org.apache.poi.ss.usermodel.Cell;
@@ -46,6 +51,12 @@ public class UploadService {
     private final ChromaApi chromaApi;
     private final DocumentLoaderService documentLoaderService;
     private final S3UploadService s3UploadService;
+    private final FinancialAssistantService financialAssistantService;
+
+    private static final String COLLECTION_NAME = "financial-docs";
+    private static final String TENANT_NAME     = "SpringAiTenant";
+    private static final String DATABASE_NAME   = "SpringAiDatabase";
+
     // Supported image formats
     private static final Set<String> SUPPORTED_IMAGE_FORMATS = Set.of(
             "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"
@@ -67,31 +78,130 @@ public class UploadService {
         return tesseract;
     }
 
-    public void processFile(MultipartFile file, String userName) {
+    /**
+     * Async entry point for uploads. The controller reads all bytes eagerly before
+     * calling this so that Spring's multipart temp-file cleanup can't race us.
+     * Uploads to S3 then indexes into the vector store.
+     */
+    @Async
+    public void processFileAsync(byte[] fileBytes, String fileName, String contentType, String userEmail) {
+        MultipartFile file = new InMemoryMultipartFile(fileBytes, fileName, contentType);
+        try {
+            s3UploadService.uploadFile(file, userEmail);
+        } catch (Exception e) {
+            log.error("S3 upload failed for {}: {}", fileName, e.getMessage(), e);
+        }
+        indexDocumentFile(new InMemoryMultipartFile(fileBytes, fileName, contentType), userEmail);
+        // Bust the cache so the next query sees the newly uploaded document immediately.
+        financialAssistantService.invalidateUserCache(userEmail);
+    }
+
+    public void processFile(MultipartFile file, String userEmail) {
+        try {
+            s3UploadService.uploadFile(file, userEmail);
+        } catch (Exception e) {
+            log.error("S3 upload failed for {}: {}", file.getOriginalFilename(), e.getMessage(), e);
+        }
+        indexDocumentFile(file, userEmail);
+        financialAssistantService.invalidateUserCache(userEmail);
+    }
+
+    /**
+     * Returns true when the user already has a file with this exact name stored in S3.
+     * Used by the upload endpoint to detect duplicates before processing starts.
+     */
+    public boolean isDuplicate(String userId, String fileName) {
+        return s3UploadService.fileExists(userId, fileName);
+    }
+
+    /**
+     * Synchronous overwrite: removes stale Chroma embeddings, re-uploads to S3, re-indexes,
+     * and busts the query cache.  Blocks until all steps are complete.
+     */
+    public void overwriteFile(MultipartFile file, String userId) {
+        String fileName = file.getOriginalFilename();
+        log.info("Overwrite started: file={} userId={}", fileName, userId);
+        removeFileEmbeddings(userId, fileName);
+        try {
+            s3UploadService.uploadFile(file, userId);
+        } catch (Exception e) {
+            log.error("S3 upload failed during overwrite for {}: {}", fileName, e.getMessage(), e);
+        }
+        indexDocumentFile(file, userId);
+        financialAssistantService.invalidateUserCache(userId);
+        log.info("Overwrite complete: file={} userId={}", fileName, userId);
+    }
+
+    /**
+     * Async overwrite: removes all Chroma embeddings for the existing file, uploads the
+     * new content to S3 (overwriting the existing object), then re-indexes into Chroma.
+     * The caller returns immediately; the heavy work runs on the async task executor.
+     */
+    @Async
+    public void overwriteFileAsync(byte[] fileBytes, String fileName, String contentType, String userId) {
+        log.info("Overwrite started: file={} userId={}", fileName, userId);
+        // Step 1 — purge stale embeddings for this specific file before re-indexing
+        removeFileEmbeddings(userId, fileName);
+        // Step 2 — push new content to S3 (PutObject silently overwrites)
+        try {
+            s3UploadService.uploadFile(new InMemoryMultipartFile(fileBytes, fileName, contentType), userId);
+        } catch (Exception e) {
+            log.error("S3 upload failed during overwrite for {}: {}", fileName, e.getMessage(), e);
+        }
+        // Step 3 — index fresh content into Chroma
+        indexDocumentFile(new InMemoryMultipartFile(fileBytes, fileName, contentType), userId);
+        // Step 4 — bust the query cache so next request sees updated data immediately
+        financialAssistantService.invalidateUserCache(userId);
+        log.info("Overwrite complete: file={} userId={}", fileName, userId);
+    }
+
+    /**
+     * Deletes every Chroma embedding that was produced from a specific file for a
+     * specific user.  Uses a compound $and filter on userEmail + fileName so only
+     * the target file's chunks are removed, leaving all other user docs untouched.
+     */
+    private void removeFileEmbeddings(String userId, String fileName) {
+        try {
+            ChromaApi.Collection collection = chromaApi.getCollection(TENANT_NAME, DATABASE_NAME, COLLECTION_NAME);
+            String collectionId = collection.id();
+
+            Map<String, Object> where = Map.of(
+                    "$and", List.of(
+                            Map.of("userEmail", Map.of("$eq", userId)),
+                            Map.of("fileName", Map.of("$eq", fileName))
+                    )
+            );
+
+            int deleted = chromaApi.deleteEmbeddings(
+                    TENANT_NAME, DATABASE_NAME, collectionId,
+                    new ChromaApi.DeleteEmbeddingsRequest(null, where)
+            );
+            log.info("Removed {} embedding(s) for file={} userId={}", deleted, fileName, userId);
+        } catch (Exception e) {
+            log.error("Failed to remove embeddings for file={} userId={}: {}", fileName, userId, e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Index a file into the vector store without uploading to S3.
+     * Used by UserDocumentService to re-index user documents on login.
+     */
+    void indexDocumentFile(MultipartFile file, String userEmail) {
         try {
 
             String fileName = file.getOriginalFilename();
             String contentType = file.getContentType();
             String fileExtension = getFileExtension(fileName);
 
-            s3UploadService.uploadFile(file, userName);
-
             log.info("Processing file: {}, type: {}, size: {} bytes, extension: {}",
                     fileName, contentType, file.getSize(), fileExtension);
 
             String extractedText;
-            Map<String,Object> metadata =
-                    new HashMap<>();
+            Map<String,Object> metadata = new HashMap<>();
 
-            metadata.put(
-                    "fileName",
-                    file.getOriginalFilename()
-            );
-
-            metadata.put(
-                    "source",
-                    "upload"
-            );
+            metadata.put("fileName", file.getOriginalFilename());
+            metadata.put("source", "upload");
+            metadata.put("userEmail", userEmail);
             metadata.put("fileType", contentType);
             metadata.put("fileExtension", fileExtension);
             metadata.put("fileSize", file.getSize());
@@ -182,21 +292,28 @@ public class UploadService {
 
             Document document = new Document(extractedText, metadata);
 
-            // Cohere embed-english-v3 on Bedrock has a hard 512-token input limit.
-            // TokenTextSplitter counts real tokens (CL100K tokenizer), so 800 tokens
-            // exceeded the limit and caused "Invalid parameter combination" from Bedrock.
-            // 380 tokens keeps every chunk comfortably under 512 even for number-dense
-            // financial text that tokenises more heavily than prose.
+            // Cohere embed-english-v3 on Bedrock has a hard 512-token limit per text.
+            // TokenTextSplitter uses CL100K (OpenAI) tokens, which can differ significantly
+            // from Cohere's tokeniser — especially for technical/number-dense PDFs where
+            // 380 CL100K tokens can exceed 512 Cohere tokens. 250 CL100K tokens gives a
+            // comfortable safety margin across all document types.
+            // truncate=END in BedrockCohereEmbeddingConfig is a backstop for any stragglers.
             TokenTextSplitter splitter = TokenTextSplitter.builder()
-                    .withChunkSize(380)
+                    .withChunkSize(250)
                     .withMinChunkSizeChars(50)
                     .withMinChunkLengthToEmbed(5)
                     .withMaxNumChunks(10000)
                     .withKeepSeparator(true)
                     .build();
 
-            List<Document> splitDocs = splitter.apply(List.of(document));
-            vectorStore.add(splitDocs);
+            List<Document> splitDocs = splitter.apply(List.of(document))
+                    .stream()
+                    .map(this::cleanChunkForCohere)
+                    .filter(Objects::nonNull)
+                    .toList();
+
+            // Cohere embed on Bedrock rejects batches > 128; use same batching as Excel path.
+            addInBatches(splitDocs);
 
             log.info("✅ File processed successfully: {} -> {} chunks, {} characters",
                     fileName, splitDocs.size(), extractedText.length());
@@ -694,5 +811,55 @@ public class UploadService {
             return "";
         }
         return fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
+    }
+
+    /**
+     * Strip control characters and ensure the chunk is non-empty before sending to Cohere.
+     * Returns null for blank chunks so they can be filtered out with Objects::nonNull.
+     */
+    private Document cleanChunkForCohere(Document doc) {
+        String text = doc.getText();
+        if (text == null) return null;
+        // Remove control characters that confuse the Cohere tokeniser
+        String cleaned = text.replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "");
+        cleaned = cleaned.replaceAll("\\s+", " ").trim();
+        if (cleaned.isEmpty()) return null;
+        return new Document(cleaned, new HashMap<>(doc.getMetadata()));
+    }
+
+    /**
+     * In-memory MultipartFile that wraps a pre-read byte array.
+     * Used so that the @Async processing thread can safely access file content
+     * after Spring has cleaned up the original multipart temp file.
+     */
+    private static final class InMemoryMultipartFile implements MultipartFile {
+        private final byte[] bytes;
+        private final String name;
+        private final String contentType;
+
+        InMemoryMultipartFile(byte[] bytes, String name, String contentType) {
+            this.bytes  = bytes;
+            this.name   = name != null ? name : "upload";
+            this.contentType = contentType;
+        }
+
+        @Override public String getName()             { return name; }
+        @Override public String getOriginalFilename() { return name; }
+        @Override public String getContentType()      { return contentType; }
+        @Override public boolean isEmpty()            { return bytes.length == 0; }
+        @Override public long getSize()               { return bytes.length; }
+        @Override public byte[] getBytes()            { return bytes; }
+        @Override public InputStream getInputStream() { return new ByteArrayInputStream(bytes); }
+        @Override public Resource getResource()       { return new org.springframework.core.io.ByteArrayResource(bytes); }
+
+        @Override
+        public void transferTo(File dest) throws IOException {
+            java.nio.file.Files.write(dest.toPath(), bytes);
+        }
+
+        @Override
+        public void transferTo(Path dest) throws IOException {
+            java.nio.file.Files.write(dest, bytes);
+        }
     }
 }

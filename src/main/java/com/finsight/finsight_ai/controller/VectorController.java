@@ -1,101 +1,76 @@
 package com.finsight.finsight_ai.controller;
 
-import com.finsight.finsight_ai.service.UploadService;
-import lombok.Data;
+import com.finsight.finsight_ai.service.DocumentLoaderService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chroma.vectorstore.ChromaApi;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.Optional;
+import java.util.Map;
 
+/**
+ * Admin-only operations for the vector store.
+ * All endpoints require a valid Bearer token (enforced by Spring Security).
+ */
 @RestController
-@RequestMapping("/api/vectors")
+@RequestMapping("/api/admin/vectors")
 @RequiredArgsConstructor
-@Data
 @Slf4j
 public class VectorController {
 
-    private final Optional<UploadService> uploadService;
-    private final Optional<ChromaApi> chromaApi;
+    private final ChromaApi chromaApi;
+    private final DocumentLoaderService documentLoaderService;
 
+    private static final String TENANT = "SpringAiTenant";
+    private static final String DATABASE = "SpringAiDatabase";
+    private static final String COLLECTION = "financial-docs";
+
+    /**
+     * Wipes the ChromaDB collection and re-indexes all base documents from S3.
+     * Use this to clean up duplicates or refresh the document set.
+     */
     @PostMapping("/reload")
-    public String reloadVectorDatabase() {
-        if (chromaApi.isEmpty()) {
-            return "Vector store not available - Chroma may not be configured.";
-        }
-
+    public ResponseEntity<Map<String, String>> reload(@AuthenticationPrincipal Jwt jwt) {
+        log.info("Vector store reload requested by user: {}", jwt.getSubject());
         try {
-            // First, try to delete the collection if it exists
+            // Wipe existing collection
             try {
-                chromaApi.get().deleteCollection(
-                        "SpringAiTenant",
-                        "SpringAiDatabase",
-                        "financial-docs"
-                );
-                return "✅ Collection deleted. Vector store reset successfully.";
+                chromaApi.deleteCollection(TENANT, DATABASE, COLLECTION);
+                log.info("Deleted ChromaDB collection '{}'", COLLECTION);
             } catch (Exception e) {
-                if (e.getMessage().contains("404")) {
-                    return "⚠️ Collection didn't exist. Starting fresh.";
-                }
-                throw e;
+                log.info("Collection '{}' not found, proceeding with fresh create", COLLECTION);
             }
+
+            // Recreate collection so vectorStore.add() works immediately
+            chromaApi.createCollection(TENANT, DATABASE, new ChromaApi.CreateCollectionRequest(COLLECTION));
+            log.info("Recreated ChromaDB collection '{}'", COLLECTION);
+
+            // Clear tracking file and re-index from S3
+            documentLoaderService.reloadDocuments();
+
+            return ResponseEntity.ok(Map.of(
+                "status", "success",
+                "message", "Collection wiped and re-indexed from S3"
+            ));
         } catch (Exception e) {
-            return "Failed to reset vector database: " + e.getMessage();
+            log.error("Vector store reload failed", e);
+            return ResponseEntity.internalServerError().body(Map.of(
+                "status", "error",
+                "message", e.getMessage()
+            ));
         }
     }
 
-    @GetMapping("/reset-hard")
-    public String hardResetVectorDatabase() {
-        if (chromaApi.isEmpty()) {
-            return "Vector store not available - cannot perform hard reset.";
-        }
-
-        try {
-            // Try to delete all possible collections
-            String[] tenants = {"SpringAiTenant", "", null};
-            String[] databases = {"SpringAiDatabase", "", null};
-            String[] collections = {"financial-docs", "default", "spring-ai", "vector_store"};
-
-            int deletedCount = 0;
-            for (String tenant : tenants) {
-                for (String database : databases) {
-                    for (String collection : collections) {
-                        try {
-                            chromaApi.get().deleteCollection(tenant, database, collection);
-                            deletedCount++;
-                            log.info("Deleted collection: tenant={}, database={}, collection={}",
-                                    tenant, database, collection);
-                        } catch (Exception e) {
-                            // Ignore 404s
-                            if (!e.getMessage().contains("404")) {
-                                log.warn("Error deleting: {}", e.getMessage());
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Restart the application to ensure clean state
-            return String.format("✅ Hard reset complete. Deleted %d collections. Please restart the application.", deletedCount);
-
-        } catch (Exception e) {
-            return "Failed to hard reset: " + e.getMessage();
-        }
-    }
-
-    @GetMapping ("/collections")
-    public Object collections() {
-        if (chromaApi.isEmpty()) {
-            return "Vector store not available - cannot list collections.";
-        }
-
-        return chromaApi.get().listCollections(
-                "SpringAiTenant",
-                "SpringAiDatabase"
-        );
+    /** Returns the list of collections — useful to verify state. */
+    @GetMapping("/collections")
+    public ResponseEntity<?> collections(@AuthenticationPrincipal Jwt jwt) {
+        log.info("Collection list requested by user: {}", jwt.getSubject());
+        return ResponseEntity.ok(chromaApi.listCollections(TENANT, DATABASE));
     }
 }

@@ -16,6 +16,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminGetUserRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthFlowType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthenticationResultType;
@@ -99,7 +100,11 @@ public class CognitoAuthService {
             cognitoClient.confirmSignUp(builder.build());
 
             log.info("User confirmed: {}", req.getEmail());
-            pinPointService.SendWelcomeEmail(req.getEmail());
+            try {
+                pinPointService.SendWelcomeEmail(req.getEmail());
+            } catch (Exception e) {
+                log.warn("Welcome email failed for {} — user is still confirmed: {}", req.getEmail(), e.getMessage());
+            }
             return AuthResponse.builder().message("Email confirmed. You can now log in.").build();
 
         } catch (CodeMismatchException e) {
@@ -168,10 +173,26 @@ public class CognitoAuthService {
                     .message("Login successful.")
                     .build();
 
-        } catch (NotAuthorizedException e) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Incorrect email or password.");
         } catch (UserNotConfirmedException e) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Account not confirmed. Check your email for the verification code.");
+        } catch (NotAuthorizedException e) {
+            // PreventUserExistenceErrors masks UserNotFoundException as NotAuthorizedException.
+            // Use adminGetUser to distinguish wrong password from non-existent account.
+            try {
+                cognitoClient.adminGetUser(AdminGetUserRequest.builder()
+                        .userPoolId(props.getUserPoolId())
+                        .username(req.getEmail())
+                        .build());
+                // User exists — it was a wrong password
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Incorrect email or password.");
+            } catch (UserNotFoundException notFound) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No account found for this email.");
+            } catch (ResponseStatusException rse) {
+                throw rse;
+            } catch (Exception adminErr) {
+                log.warn("adminGetUser check failed: {}", adminErr.getMessage());
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Incorrect email or password.");
+            }
         } catch (UserNotFoundException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No account found for this email.");
         } catch (CognitoIdentityProviderException e) {

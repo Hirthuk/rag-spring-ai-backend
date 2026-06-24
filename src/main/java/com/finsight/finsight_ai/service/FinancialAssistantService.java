@@ -10,6 +10,7 @@ import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
+import com.finsight.finsight_ai.service.retrieval.RetrievalService;
 import com.finsight.finsight_ai.service.search.TavilySearchService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.codec.ServerSentEvent;
@@ -25,6 +26,7 @@ public class FinancialAssistantService {
 
     private final ChatModel chatModel;
     private final VectorStore vectorStore;
+    private final RetrievalService retrievalService;
     private final TavilySearchService tavilySearchService;
 
     // User-facing messages (never leak internals like "upload documents" or exceptions)
@@ -33,8 +35,8 @@ public class FinancialAssistantService {
     private static final String MSG_ERROR =
             "Sorry, I couldn't complete that analysis right now. Please try again in a moment.";
 
-    // Lightweight in-process cache for vector similarity results to cut repeat latency.
-    // Data is static at runtime, so a short TTL is safe; cache is empty on each restart.
+    // Cache key includes the current user's sub so that different users never share
+    // each other's cached results (user-uploaded docs differ per user).
     private static final long SEARCH_CACHE_TTL_MS = 10 * 60 * 1000L; // 10 minutes
     private static final int SEARCH_CACHE_MAX = 100;
     private final Map<String, CachedSearch> searchCache = new java.util.concurrent.ConcurrentHashMap<>();
@@ -271,6 +273,36 @@ public class FinancialAssistantService {
             TRIGGERS: "compare X and Y", "X vs Y", "X versus Y", "which is better", "compare TCS Infosys HCL"
             ----------------------------------------------------------------
 
+            *** COMPARISON DATA INTEGRITY — NON-NEGOTIABLE ***
+
+            Before building any comparison table, scan the provided context for revenue,
+            profit, or margin figures attributed to EACH company named in the user's question.
+
+            RULE 1 — NEVER put a placeholder ([figure], [N/A], [unknown], [HCL figure],
+            [winner], "Data not available", "—", etc.) in a table cell. Every cell must
+            contain a real number or real text extracted from the context. A placeholder is a
+            CRITICAL ERROR.
+
+            RULE 2 — Only trigger this rule when you genuinely cannot find ANY revenue,
+            profit, or margin figure for one of the companies in the entire context.
+              - Do NOT trigger this rule because the companies are different sizes.
+              - Do NOT trigger this rule because they report in different currencies (USD vs INR).
+              - Do NOT trigger this rule because one company is much smaller than the other.
+              - ONLY trigger it when the context contains zero financial figures for that company.
+              If triggered:
+                > **Data available for [Company A] only.**
+                > I do not have [Company B]'s financial data in my knowledge base.
+                > Please upload [Company B]'s financial report to enable a head-to-head comparison.
+              Then provide a full single-company deep-dive for the company whose data IS present.
+
+            RULE 3 — If both companies have any revenue/profit figures in the context,
+            build the full comparison. Convert currencies transparently (note "in USD Million"
+            vs "in INR Crore") rather than refusing. Show every metric you have; omit a row
+            only if NEITHER company has that specific metric — never omit a row just because
+            one company's figure seems small. The context is the ground truth.
+
+            *** COMPARISON TEMPLATE (use ONLY when data exists for both companies) ***
+
             ## [Company A] vs [Company B] -- Head-to-Head Analysis
 
             ---
@@ -279,9 +311,9 @@ public class FinancialAssistantService {
 
             | Metric | [Company A] | [Company B] | Winner |
             |--------|------------|------------|--------|
-            | **Latest Revenue** | [figure] | [figure] | [winner] |
-            | **Revenue CAGR (5Y)** | X% | X% | [winner] |
-            | **Market Cap** | [figure] | [figure] | [winner] |
+            | **Latest Revenue** | $X | $Y | [Company A or B] |
+            | **Revenue CAGR (5Y)** | X% | Y% | [Company A or B] |
+            | **Market Cap** | $X | $Y | [Company A or B] |
 
             ---
 
@@ -289,8 +321,8 @@ public class FinancialAssistantService {
 
             | Metric | [Company A] | [Company B] | Winner |
             |--------|------------|------------|--------|
-            | **Net Profit** | [figure] | [figure] | [winner] |
-            | **Net Margin** | X% | X% | [winner] |
+            | **Net Profit** | $X | $Y | [Company A or B] |
+            | **Net Margin** | X% | Y% | [Company A or B] |
 
             ---
 
@@ -298,8 +330,8 @@ public class FinancialAssistantService {
 
             | Metric | [Company A] | [Company B] | Winner |
             |--------|------------|------------|--------|
-            | **Revenue Growth (YoY)** | X% | X% | [winner] |
-            | **Profit Growth (YoY)** | X% | X% | [winner] |
+            | **Revenue Growth (YoY)** | X% | Y% | [Company A or B] |
+            | **Profit Growth (YoY)** | X% | Y% | [Company A or B] |
 
             ---
 
@@ -307,17 +339,17 @@ public class FinancialAssistantService {
 
             | Category | Winner | Reason |
             |----------|--------|--------|
-            | Revenue Scale | [A/B] | [1-line reason] |
-            | Growth Rate | [A/B] | [1-line reason] |
-            | Profitability | [A/B] | [1-line reason] |
-            | Risk Profile | [A/B] | [1-line reason] |
-            | Long-Term Outlook | [A/B] | [1-line reason] |
+            | Revenue Scale | [Company A or B] | [1-line reason with real numbers] |
+            | Growth Rate | [Company A or B] | [1-line reason with real numbers] |
+            | Profitability | [Company A or B] | [1-line reason with real numbers] |
+            | Risk Profile | [Company A or B] | [1-line reason with real numbers] |
+            | Long-Term Outlook | [Company A or B] | [1-line reason with real numbers] |
 
             ---
 
             ## Overall Assessment
 
-            [3-4 sentences: balanced conclusion with a clear recommendation]
+            [3-4 sentences: balanced conclusion with a clear recommendation, every claim backed by a number from the context]
 
             ----------------------------------------------------------------
             LEVEL 6 -- Investment Questions
@@ -570,7 +602,7 @@ public class FinancialAssistantService {
             Whenever your response contains financial data across 2 or more years (historical OR forecast),
             append EXACTLY this line as the very LAST line of your response, after all markdown:
 
-            CHARTDATA_JSON:[{"year":"FY2024","value":109913,"type":"historical"},{"year":"FY2025F","value":125000,"type":"forecast"}]
+            CHARTDATA_JSON:[{"year":"FY2024","value":109913,"type":"historical","company_name":"HCL Technologies"},{"year":"FY2025F","value":125000,"type":"forecast","company_name":"HCL Technologies"}]
 
             FORMAT RULES (no exceptions):
             - "year": "FY" prefix + 4-digit year for historical → "FY2024"
@@ -581,6 +613,10 @@ public class FinancialAssistantService {
                        If the response says "$500 million"        → value is 500
                        DO NOT convert to base units (not rupees, not cents, not raw dollars)
             - "type": "historical" for actual data, "forecast" for projections
+            - "company_name": the exact company name this data point belongs to
+                       Single-company response   → same name for every point → "HCL Technologies"
+                       Comparison response       → alternate names per point → "HCL Technologies" / "Presidio"
+                       NEVER omit this field — the chart renderer uses it to draw separate series
             - Include EVERY year present in your response tables/analysis
 
             ABSOLUTE TEXT PROHIBITION:
@@ -598,12 +634,17 @@ public class FinancialAssistantService {
             String context = relevantDocs.isEmpty() ? "" : buildFinancialContext(relevantDocs);
             boolean tavilyUsed = false;
 
-            // Fallback: RAG returned nothing, OR the docs retrieved don't mention the
-            // company/entity being asked about (e.g. HCL docs for a Meta query).
+            // If RAG context is absent or doesn't cover the queried entity, call Tavily.
+            // When RAG docs exist but lack full coverage, SUPPLEMENT (append) rather than
+            // replace, so the LLM can draw on both the private documents and public web data.
             if (context.isBlank() || !isRagContextRelevant(query, context)) {
                 String tavilyResult = tavilySearchService.search(query);
                 if (tavilyResult != null && !tavilyResult.isBlank()) {
-                    context = tavilyResult;
+                    if (context.isBlank()) {
+                        context = tavilyResult;
+                    } else {
+                        context = context + "\n\n--- SUPPLEMENTARY WEB DATA ---\n\n" + tavilyResult;
+                    }
                     tavilyUsed = true;
                 }
             }
@@ -611,6 +652,9 @@ public class FinancialAssistantService {
             log.info("[FINSIGHT] RAG: {} | Tavily: {}",
                     relevantDocs.isEmpty() ? "No" : "Yes (" + relevantDocs.size() + " docs)",
                     tavilyUsed ? "Yes" : "No");
+            if (!relevantDocs.isEmpty()) {
+                log.info("[FINSIGHT] Documents used: {}", extractDocumentNames(relevantDocs));
+            }
 
             String userPrompt = buildDetailedPrompt(query, context);
             String rawAnalysis = callModelWithSystemPrompt(userPrompt);
@@ -623,11 +667,14 @@ public class FinancialAssistantService {
     }
 
     /**
-     * Cached vector similarity search. Identical queries within the TTL window reuse
-     * the previous result, skipping the embedding call + Chroma round trip.
+     * User-scoped cached vector similarity search.
+     * Routes through RetrievalService so the user-ownership filter is applied.
+     * Cache key includes the current user's sub so different users never share results.
      */
     private List<Document> searchDocuments(String query) {
-        String key = query == null ? "" : query.trim().toLowerCase();
+        // Include the current user's sub in the cache key for isolation
+        String userId = getCurrentUserId();
+        String key = (userId != null ? userId : "anon") + "::" + (query == null ? "" : query.trim().toLowerCase());
         long now = System.currentTimeMillis();
 
         CachedSearch cached = searchCache.get(key);
@@ -635,12 +682,7 @@ public class FinancialAssistantService {
             return cached.docs();
         }
 
-        List<Document> docs = vectorStore.similaritySearch(
-                org.springframework.ai.vectorstore.SearchRequest.builder()
-                        .query(query)
-                        .topK(20)
-                        .build()
-        );
+        List<Document> docs = retrievalService.retrieveRelevantDocuments(query);
         if (docs == null) {
             docs = Collections.emptyList();
         }
@@ -649,6 +691,38 @@ public class FinancialAssistantService {
         }
         searchCache.put(key, new CachedSearch(docs, now));
         return docs;
+    }
+
+    private String getCurrentUserId() {
+        try {
+            org.springframework.security.core.Authentication auth =
+                    org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.getPrincipal() instanceof org.springframework.security.oauth2.jwt.Jwt jwt) {
+                return jwt.getSubject();
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    /**
+     * Removes all cached search results for the given user.
+     * Must be called whenever the user's document set changes (upload, login reload, logout)
+     * so the next query re-runs against the updated vector store contents.
+     */
+    public void invalidateUserCache(String userId) {
+        if (userId == null || userId.isBlank()) return;
+        String prefix = userId + "::";
+        int removed = 0;
+        var it = searchCache.entrySet().iterator();
+        while (it.hasNext()) {
+            if (it.next().getKey().startsWith(prefix)) {
+                it.remove();
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            log.info("[CACHE] Invalidated {} cached search(es) for userId={}", removed, userId);
+        }
     }
 
     /** Wrap a plain user-facing message as the standard JSON response (no internals). */
@@ -684,13 +758,18 @@ public class FinancialAssistantService {
                 : buildFinancialContext(relevantDocs);
         boolean tavilyUsed = false;
 
-        // Fallback: RAG returned nothing, OR the docs don't mention the company being asked
-        // about (e.g. HCL docs returned for a Meta query — irrelevant context).
+        // If RAG context is absent or doesn't cover the queried entity, call Tavily.
+        // When RAG docs exist but lack full coverage, SUPPLEMENT (append) rather than
+        // replace, so the LLM can draw on both private documents and public web data.
         if (context.isBlank() || !isRagContextRelevant(query, context)) {
             try {
                 String tavilyResult = tavilySearchService.search(query);
                 if (tavilyResult != null && !tavilyResult.isBlank()) {
-                    context = tavilyResult;
+                    if (context.isBlank()) {
+                        context = tavilyResult;
+                    } else {
+                        context = context + "\n\n--- SUPPLEMENTARY WEB DATA ---\n\n" + tavilyResult;
+                    }
                     tavilyUsed = true;
                 }
             } catch (Exception e) {
@@ -702,6 +781,9 @@ public class FinancialAssistantService {
                 (relevantDocs == null || relevantDocs.isEmpty())
                         ? "No" : "Yes (" + relevantDocs.size() + " docs)",
                 tavilyUsed ? "Yes" : "No");
+        if (relevantDocs != null && !relevantDocs.isEmpty()) {
+            log.info("[FINSIGHT-STREAM] Documents used: {}", extractDocumentNames(relevantDocs));
+        }
         String userPrompt = buildDetailedPrompt(query, context);
 
         SystemMessage systemMessage = new SystemMessage(FINANCIAL_SYSTEM_PROMPT);
@@ -852,12 +934,36 @@ public class FinancialAssistantService {
      * Common English words that happen to start with a capital at the beginning of a
      * sentence are excluded from the check so they don't produce false positives.
      */
+    // Words that can appear capitalised mid-sentence (question openers, financial terms,
+    // generic English) but are NOT company names. Keeping this list wide prevents the
+    // isRagContextRelevant check from falsely discarding good RAG context when the
+    // query starts with or contains one of these capitalised tokens.
     private static final java.util.Set<String> COMMON_WORDS = java.util.Set.of(
-            "tell", "what", "show", "give", "how", "the", "about", "over", "last",
-            "next", "years", "year", "growth", "revenue", "profit", "financial",
-            "analysis", "compare", "will", "where", "when", "who", "why", "which",
-            "can", "could", "would", "should", "does", "did", "has", "have", "had",
-            "its", "their", "our", "your", "more", "much", "many", "some", "any"
+            // question / request openers
+            "tell", "what", "show", "give", "how", "the", "about", "over",
+            "where", "when", "who", "why", "which", "can", "could", "would",
+            "should", "does", "did", "has", "have", "had", "get", "find",
+            "list", "provide", "calculate", "predict", "analyze", "analyse",
+            // time / scope qualifiers
+            "last", "next", "years", "year", "quarter", "quarters", "decade",
+            "current", "latest", "recent", "future", "past", "historical",
+            "annual", "quarterly", "monthly",
+            // financial terms that look proper-noun-ish when capitalised
+            "growth", "revenue", "profit", "margin", "earnings", "ebitda", "cagr",
+            "financial", "analysis", "performance", "percentage", "returns",
+            "market", "share", "capital", "investment", "trend", "trends",
+            "forecast", "projection", "comparison", "benchmark",
+            // result / judgement words
+            "winner", "loser", "better", "worse", "higher", "lower",
+            "best", "worst", "top", "bottom", "high", "low", "strong", "weak",
+            // generic nouns / connectors
+            "both", "all", "its", "their", "our", "your", "any", "some",
+            "more", "much", "many", "will", "compare",
+            "company", "companies", "firms", "firm", "business", "businesses",
+            "sector", "industry", "industries", "segment", "segments",
+            "data", "report", "reports", "result", "results",
+            "detail", "details", "overview", "summary", "interms", "terms",
+            "following", "using", "based"
     );
 
     private boolean isRagContextRelevant(String query, String context) {
@@ -1019,14 +1125,16 @@ public class FinancialAssistantService {
                 com.fasterxml.jackson.databind.JsonNode arr =
                         new com.fasterxml.jackson.databind.ObjectMapper().readTree(rawJson);
                 for (com.fasterxml.jackson.databind.JsonNode item : arr) {
-                    String year  = item.has("year")  ? item.get("year").asText()  : null;
-                    long   value = item.has("value") ? item.get("value").asLong() : 0;
-                    String type  = item.has("type")  ? item.get("type").asText()  : "historical";
+                    String year        = item.has("year")         ? item.get("year").asText()         : null;
+                    long   value       = item.has("value")        ? item.get("value").asLong()        : 0;
+                    String type        = item.has("type")         ? item.get("type").asText()         : "historical";
+                    String companyName = item.has("company_name") ? item.get("company_name").asText() : "Unknown";
                     if (year != null && value > 0) {
                         Map<String, Object> pt = new HashMap<>();
-                        pt.put("year",  year);
-                        pt.put("value", value);
-                        pt.put("type",  type);
+                        pt.put("year",         year);
+                        pt.put("value",        value);
+                        pt.put("type",         type);
+                        pt.put("company_name", companyName);
                         data.add(pt);
                     }
                 }
@@ -1207,5 +1315,15 @@ public class FinancialAssistantService {
                 .yearForecasts(forecastYears)
                 .confidence("HIGH")
                 .build();
+    }
+
+    private List<String> extractDocumentNames(List<Document> docs) {
+        return docs.stream()
+                .map(doc -> {
+                    Object name = doc.getMetadata().get("fileName");
+                    return name != null ? name.toString() : "unknown";
+                })
+                .distinct()
+                .collect(java.util.stream.Collectors.toList());
     }
 }

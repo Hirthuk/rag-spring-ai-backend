@@ -3,9 +3,13 @@ package com.finsight.finsight_ai.service;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import com.finsight.finsight_ai.service.s3.S3UploadService;
 import org.springframework.ai.chroma.vectorstore.ChromaApi;
 import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
@@ -15,10 +19,6 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -61,7 +61,10 @@ public class DocumentLoaderService {
     private static final String COLLECTION_NAME = "financial-docs";
     private static final String TENANT_NAME = "SpringAiTenant";
     private static final String DATABASE_NAME = "SpringAiDatabase";
-    private static final String HASH_TRACKING_FILE = ".document-hashes";
+    private static final String HASH_TRACKING_S3_KEY = ".document-hashes";
+
+    /** Metadata value used to mark documents loaded at startup as system-wide shared content. */
+    public static final String SYSTEM_USER_ID = "SYSTEM";
 
     private final Set<String> processedFileHashes = new HashSet<>();
 
@@ -77,6 +80,15 @@ public class DocumentLoaderService {
             if (!processedFileHashes.isEmpty() && isVectorStoreEmpty()) {
                 log.warn("Tracking file lists {} documents but the vector store is EMPTY — forcing full re-ingest.",
                         processedFileHashes.size());
+                processedFileHashes.clear();
+                resetHashTrackingFile();
+            }
+
+            // Self-healing migration: if tracked docs exist in Chroma but none carry
+            // userEmail=SYSTEM, they were indexed before the native filter was added.
+            // Force a re-ingest so the filter works correctly from the first request.
+            if (!processedFileHashes.isEmpty() && systemDocsMissingUserEmailTag()) {
+                log.warn("System documents lack userEmail=SYSTEM metadata — forcing re-ingest to migrate.");
                 processedFileHashes.clear();
                 resetHashTrackingFile();
             }
@@ -181,6 +193,11 @@ public class DocumentLoaderService {
                 String key = obj.key();
                 // Skip S3 "folder" markers (keys ending with /)
                 if (key.endsWith("/")) continue;
+                // Skip user-uploaded documents — those are managed per-session by UserDocumentService
+                if (key.startsWith(S3UploadService.USER_UPLOADS_PREFIX)) {
+                    log.debug("Skipping user-upload path at startup: {}", key);
+                    continue;
+                }
 
                 String ext = getFileExtension(key);
                 if (!SUPPORTED_EXTENSIONS.contains(ext)) {
@@ -239,49 +256,76 @@ public class DocumentLoaderService {
         }
     }
 
+    /**
+     * Returns true when the vector store has content but none of it carries the
+     * userEmail=SYSTEM tag introduced with native Chroma filtering.  Used once on
+     * startup to self-heal a pre-migration collection.
+     */
+    private boolean systemDocsMissingUserEmailTag() {
+        try {
+            var b = new FilterExpressionBuilder();
+            Filter.Expression filter = b.eq("userEmail", SYSTEM_USER_ID).build();
+            var results = vectorStore.similaritySearch(
+                    SearchRequest.builder()
+                            .query("financial revenue profit company")
+                            .topK(1)
+                            .filterExpression(filter)
+                            .build()
+            );
+            boolean missing = (results == null || results.isEmpty());
+            if (missing) log.info("Migration check: no system docs with userEmail=SYSTEM found.");
+            return missing;
+        } catch (Exception e) {
+            log.warn("Migration check failed ({}), skipping re-ingest.", e.getMessage());
+            return false;
+        }
+    }
+
     private void resetHashTrackingFile() {
         try {
-            File trackingFile = new File(HASH_TRACKING_FILE);
-            if (trackingFile.exists() && trackingFile.delete()) {
-                log.info("Deleted stale hash tracking file: {}", HASH_TRACKING_FILE);
-            }
+            s3Client.deleteObject(b -> b.bucket(bucketName).key(HASH_TRACKING_S3_KEY));
+            log.info("Deleted stale hash tracking file from S3: {}", HASH_TRACKING_S3_KEY);
         } catch (Exception e) {
-            log.warn("Could not delete stale hash tracking file: {}", e.getMessage());
+            log.warn("Could not delete stale hash tracking file from S3: {}", e.getMessage());
         }
     }
 
     private void loadExistingDocumentHashes() {
         try {
-            File trackingFile = new File(HASH_TRACKING_FILE);
-            if (trackingFile.exists()) {
-                try (BufferedReader reader = new BufferedReader(new FileReader(trackingFile))) {
-                    String line;
-                    int loadedCount = 0;
-                    while ((line = reader.readLine()) != null) {
-                        if (!line.trim().isEmpty()) {
-                            processedFileHashes.add(line.trim());
-                            loadedCount++;
-                        }
-                    }
-                    log.info("Loaded {} document hashes from tracking file", loadedCount);
+            var response = s3Client.getObjectAsBytes(b -> b.bucket(bucketName).key(HASH_TRACKING_S3_KEY));
+            String content = response.asUtf8String();
+            int loadedCount = 0;
+            for (String line : content.split("\n")) {
+                if (!line.trim().isEmpty()) {
+                    processedFileHashes.add(line.trim());
+                    loadedCount++;
                 }
-            } else {
-                log.info("No existing tracking file found - first time loading documents");
             }
+            log.info("Loaded {} document hashes from S3 tracking file", loadedCount);
+        } catch (software.amazon.awssdk.services.s3.model.NoSuchKeyException e) {
+            log.info("No existing tracking file found in S3 - first time loading documents");
         } catch (Exception e) {
-            log.warn("Could not load existing document hashes: {}", e.getMessage());
+            log.warn("Could not load existing document hashes from S3: {}", e.getMessage());
         }
     }
 
     private void saveDocumentHash(String hash) {
         try {
-            File trackingFile = new File(HASH_TRACKING_FILE);
-            try (BufferedWriter writer = new BufferedWriter(new FileWriter(trackingFile, true))) {
-                writer.write(hash);
-                writer.newLine();
-            }
+            // Read current content, append new hash, write back
+            String existing = "";
+            try {
+                existing = s3Client.getObjectAsBytes(b -> b.bucket(bucketName).key(HASH_TRACKING_S3_KEY))
+                        .asUtf8String();
+            } catch (software.amazon.awssdk.services.s3.model.NoSuchKeyException ignored) {}
+
+            String updated = existing + hash + "\n";
+            s3Client.putObject(
+                    b -> b.bucket(bucketName).key(HASH_TRACKING_S3_KEY)
+                            .contentType("text/plain"),
+                    software.amazon.awssdk.core.sync.RequestBody.fromString(updated)
+            );
         } catch (Exception e) {
-            log.warn("Could not save document hash to tracking file: {}", e.getMessage());
+            log.warn("Could not save document hash to S3 tracking file: {}", e.getMessage());
         }
     }
 
@@ -587,6 +631,7 @@ public class DocumentLoaderService {
         metadata.put("fileName", resource.getFilename());
         metadata.put("source", "s3://" + bucketName);
         metadata.put("fileType", fileType);
+        metadata.put("userEmail", SYSTEM_USER_ID); // marks as shared system document for native Chroma filter
         metadata.put("timestamp", System.currentTimeMillis());
         try {
             metadata.put("fileSize", resource.contentLength());
@@ -634,15 +679,7 @@ public class DocumentLoaderService {
     public void reloadDocuments() {
         log.info("Manual reload triggered - clearing cache and reloading all documents from s3://{}", bucketName);
         processedFileHashes.clear();
-        try {
-            File trackingFile = new File(HASH_TRACKING_FILE);
-            if (trackingFile.exists()) {
-                trackingFile.delete();
-                log.info("Deleted tracking file");
-            }
-        } catch (Exception e) {
-            log.warn("Could not delete tracking file: {}", e.getMessage());
-        }
+        resetHashTrackingFile();
         loadDocuments();
     }
 }
