@@ -9,7 +9,9 @@ import net.sourceforge.tess4j.Tesseract;
 import net.sourceforge.tess4j.TesseractException;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.ai.chroma.vectorstore.ChromaApi;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
@@ -46,6 +48,9 @@ import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 @Slf4j
 public class UploadService {
 
+    @Value("${TESSERACT_LIB_PATH:/opt/homebrew/lib}")
+    private String tesseractLibPath;
+
     private final VectorStore vectorStore;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ChromaApi chromaApi;
@@ -62,15 +67,17 @@ public class UploadService {
             "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"
     );
 
-    // Initialize Tesseract OCR
+    // Initialize Tesseract OCR — reads lib path from env so it works on both macOS and ECS Linux
     private Tesseract getTesseractInstance() {
-        // 1. Force JNA to look in the Homebrew directory for the native library
-        System.setProperty("jna.library.path", "/opt/homebrew/lib");
+        System.setProperty("jna.library.path", tesseractLibPath);
 
         Tesseract tesseract = new Tesseract();
 
-        // 2. Point Tesseract to the language data files, otherwise it will crash next!
-        tesseract.setDatapath("/opt/homebrew/share/tessdata");
+        // Derive tessdata path: macOS homebrew → /opt/homebrew/share/tessdata, Linux → /usr/share/tessdata
+        String tessDataPath = tesseractLibPath.contains("homebrew")
+                ? "/opt/homebrew/share/tessdata"
+                : "/usr/share/tessdata";
+        tesseract.setDatapath(tessDataPath);
 
         tesseract.setLanguage("eng");
         tesseract.setOcrEngineMode(3);
@@ -450,29 +457,57 @@ public class UploadService {
     }
 
     /**
-     * Extract text from PDF using PDFBox 3.x
+     * Extract text from PDF using PDFBox 3.x.
+     * Falls back to OCR (Tesseract via PDFRenderer) when PDFBox finds no selectable text —
+     * handles scanned/image-based PDFs that would otherwise be indexed as empty.
      */
     private String extractTextFromPdf(MultipartFile file) {
-        try (InputStream inputStream = file.getInputStream()) {
-            Map<String,Object> metadata =
-                    new HashMap<>();
-
-            metadata.put(
-                    "fileName",
-                    file.getOriginalFilename()
-            );
-
-            metadata.put(
-                    "source",
-                    "upload"
-            );
-            PDDocument document = Loader.loadPDF(inputStream.readAllBytes());
+        try {
+            byte[] pdfBytes = file.getBytes();
+            PDDocument document = Loader.loadPDF(pdfBytes);
             PDFTextStripper stripper = new PDFTextStripper();
             String extractedText = stripper.getText(document);
+
+            if (extractedText == null || extractedText.trim().isEmpty()) {
+                log.info("PDFBox found no selectable text in {}, trying OCR on rendered pages", file.getOriginalFilename());
+                extractedText = extractTextFromPdfViaOcr(document, file.getOriginalFilename());
+            }
+
             document.close();
             return cleanExtractedText(extractedText);
         } catch (Exception e) {
             log.error("Error extracting text from PDF: {}", file.getOriginalFilename(), e);
+            return "";
+        }
+    }
+
+    /**
+     * Renders each PDF page as a 200-DPI image and runs Tesseract OCR on it.
+     * Used as a fallback for scanned / image-only PDFs.
+     */
+    private String extractTextFromPdfViaOcr(PDDocument document, String fileName) {
+        try {
+            PDFRenderer renderer = new PDFRenderer(document);
+            Tesseract tesseract = getTesseractInstance();
+            StringBuilder text = new StringBuilder();
+            int pages = Math.min(document.getNumberOfPages(), 15);
+            for (int i = 0; i < pages; i++) {
+                try {
+                    BufferedImage image = renderer.renderImageWithDPI(i, 200);
+                    image = preprocessImageForOCR(image);
+                    String pageText = tesseract.doOCR(image);
+                    if (pageText != null && !pageText.isBlank()) {
+                        text.append(pageText).append("\n");
+                    }
+                } catch (Exception e) {
+                    log.warn("OCR failed on page {} of {}: {}", i + 1, fileName, e.getMessage());
+                }
+            }
+            String result = text.toString().trim();
+            log.info("PDF OCR extracted {} characters from {} page(s) of {}", result.length(), pages, fileName);
+            return result;
+        } catch (Exception e) {
+            log.warn("PDF OCR fallback failed for {}: {}", fileName, e.getMessage());
             return "";
         }
     }

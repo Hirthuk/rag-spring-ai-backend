@@ -634,10 +634,15 @@ public class FinancialAssistantService {
             String context = relevantDocs.isEmpty() ? "" : buildFinancialContext(relevantDocs);
             boolean tavilyUsed = false;
 
-            // If RAG context is absent or doesn't cover the queried entity, call Tavily.
-            // When RAG docs exist but lack full coverage, SUPPLEMENT (append) rather than
-            // replace, so the LLM can draw on both the private documents and public web data.
-            if (context.isBlank() || !isRagContextRelevant(query, context)) {
+            // If the user has their own uploaded documents in the result, always trust them —
+            // they were uploaded specifically for this context and the vector search already
+            // validated relevance. Only fall back to Tavily for system-document-only results
+            // where the queried entity isn't clearly covered.
+            boolean hasUserDocs = relevantDocs.stream()
+                    .anyMatch(d -> !com.finsight.finsight_ai.service.DocumentLoaderService.SYSTEM_USER_ID
+                            .equals(d.getMetadata().get("userEmail")));
+
+            if (context.isBlank() || (!hasUserDocs && !isRagContextRelevant(query, context))) {
                 String tavilyResult = tavilySearchService.search(query);
                 if (tavilyResult != null && !tavilyResult.isBlank()) {
                     if (context.isBlank()) {
@@ -758,10 +763,11 @@ public class FinancialAssistantService {
                 : buildFinancialContext(relevantDocs);
         boolean tavilyUsed = false;
 
-        // If RAG context is absent or doesn't cover the queried entity, call Tavily.
-        // When RAG docs exist but lack full coverage, SUPPLEMENT (append) rather than
-        // replace, so the LLM can draw on both private documents and public web data.
-        if (context.isBlank() || !isRagContextRelevant(query, context)) {
+        boolean hasUserDocs = relevantDocs != null && relevantDocs.stream()
+                .anyMatch(d -> !com.finsight.finsight_ai.service.DocumentLoaderService.SYSTEM_USER_ID
+                        .equals(d.getMetadata().get("userEmail")));
+
+        if (context.isBlank() || (!hasUserDocs && !isRagContextRelevant(query, context))) {
             try {
                 String tavilyResult = tavilySearchService.search(query);
                 if (tavilyResult != null && !tavilyResult.isBlank()) {
